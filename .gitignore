@@ -1,0 +1,12 @@
+.DS_Store
+.idea
+
+crash.log
+crash.*.log
+
+.agents
+.claude
+docs/plans/
+docs/superpowers/
+.codex
+AGENTS.*
