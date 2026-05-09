@@ -10,3 +10,16 @@ docs/plans/
 docs/superpowers/
 .codex
 AGENTS.*
+
+# Go build artifacts
+/northwatch
+*.exe
+*.test
+*.out
+coverage.out
+vendor/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
