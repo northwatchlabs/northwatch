@@ -1,0 +1,12 @@
+{{define "card"}}
+<article class="rounded-lg border border-gray-200 bg-white p-4 flex items-center justify-between">
+  <div>
+    <h2 class="font-medium">{{.DisplayName}}</h2>
+    <p class="text-sm text-gray-500">{{.Kind}}/{{.Namespace}}/{{.Name}}</p>
+  </div>
+  <span class="inline-flex items-center gap-2 text-sm">
+    <span class="h-2.5 w-2.5 rounded-full {{if eq .Status "operational"}}bg-green-500{{else if eq .Status "degraded"}}bg-yellow-500{{else if eq .Status "down"}}bg-red-500{{else}}bg-gray-400{{end}}"></span>
+    <span class="capitalize">{{.Status}}</span>
+  </span>
+</article>
+{{end}}
