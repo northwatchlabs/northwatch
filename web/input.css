@@ -1,0 +1,5 @@
+@import "tailwindcss";
+
+/* Templates Tailwind should scan for utility classes. Paths are
+   relative to this file. */
+@source "../internal/ui/templates/**/*.html";

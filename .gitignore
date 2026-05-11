@@ -19,6 +19,9 @@ AGENTS.*
 coverage.out
 vendor/
 
+# Standalone Tailwind binary (downloaded locally)
+/bin/
+
 # Local databases
 *.db
 *.sqlite
