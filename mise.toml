@@ -1,4 +1,4 @@
 [tools]
 go = "1.24.4"
 golangci-lint = "2.12.2"
-tailwindcss = "4.3.0"
+"aqua:tailwindlabs/tailwindcss" = "4.3.0"
