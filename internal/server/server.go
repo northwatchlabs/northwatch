@@ -10,29 +10,20 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/northwatchlabs/northwatch/internal/component"
+	"github.com/northwatchlabs/northwatch/internal/store"
 	"github.com/northwatchlabs/northwatch/internal/ui"
 )
 
-// Component is the minimal shape rendered by the status page. The
-// store-backed type lands with the persistence layer; the server keeps
-// this local for now to avoid a circular dependency with future store
-// packages.
-type Component struct {
-	Kind        string
-	Namespace   string
-	Name        string
-	DisplayName string
-	Status      string
-}
-
 type pageData struct {
 	Title      string
-	Components []Component
+	Components []component.Component
 }
 
 // New returns an http.Handler with routes for the status page,
-// healthcheck, and embedded static assets.
-func New(logger *slog.Logger) (http.Handler, error) {
+// healthcheck, and embedded static assets. The store is consulted on
+// every index render.
+func New(logger *slog.Logger, st store.Store) (http.Handler, error) {
 	tmpl, err := ui.Templates()
 	if err != nil {
 		return nil, err
@@ -53,28 +44,26 @@ func New(logger *slog.Logger) (http.Handler, error) {
 	})
 
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServerFS(staticFS)))
-
-	r.Get("/", indexHandler(tmpl))
+	r.Get("/", indexHandler(tmpl, st, logger))
 
 	return r, nil
 }
 
-func indexHandler(tmpl *template.Template) http.HandlerFunc {
-	data := pageData{
-		Title: "All Systems Operational",
-		Components: []Component{
-			{
-				Kind:        "Deployment",
-				Namespace:   "default",
-				Name:        "northwatch",
-				DisplayName: "NorthWatch",
-				Status:      "operational",
-			},
-		},
-	}
-	return func(w http.ResponseWriter, _ *http.Request) {
-		// Render into a buffer so a mid-template failure can return
-		// a clean 500 instead of a 200 with a truncated body.
+func indexHandler(tmpl *template.Template, st store.Store, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		comps, err := st.ListComponents(r.Context())
+		if err != nil {
+			logger.Error("index: ListComponents failed", "err", err)
+			http.Error(w, "store error", http.StatusInternalServerError)
+			return
+		}
+		data := pageData{
+			// Title stays static for v0.1. A future PR derives it from
+			// component statuses (e.g. "Service Degraded" when any
+			// component is non-operational).
+			Title:      "All Systems Operational",
+			Components: comps,
+		}
 		var buf bytes.Buffer
 		if err := tmpl.ExecuteTemplate(&buf, "layout", data); err != nil {
 			http.Error(w, "render error", http.StatusInternalServerError)
