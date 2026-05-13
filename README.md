@@ -33,13 +33,28 @@ that downstream tooling depends on.
 
 ## Develop
 
+Tool versions are pinned in [`.tool-versions`](./.tool-versions) and
+managed with [mise](https://mise.jdx.dev/) (asdf-compatible). Install
+once, then trust the project on first `cd`:
+
+```sh
+brew install mise                            # or see https://mise.jdx.dev/installing-mise.html
+echo 'eval "$(mise activate zsh)"' >> ~/.zshrc   # bash/fish: see mise docs
+mise trust && mise install                   # installs go, golangci-lint
+```
+
+Then:
+
 ```sh
 make build    # compile cmd/northwatch
 make test     # run unit tests
 make vet      # go vet
-make lint     # golangci-lint (must be installed)
+make lint     # golangci-lint
 make run      # build and run
 ```
+
+The existing `.tool-versions` file is also read by asdf if you prefer
+to stick with that.
 
 ## License
 
