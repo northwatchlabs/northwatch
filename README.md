@@ -33,11 +33,24 @@ that downstream tooling depends on.
 
 ## Develop
 
+Tool versions are pinned in [`mise.toml`](./mise.toml) and managed
+with [mise](https://mise.jdx.dev/). Install once, then trust and
+install the project's tools:
+
+```sh
+brew install mise                                # or see https://mise.jdx.dev/installing-mise.html
+echo 'eval "$(mise activate zsh)"' >> ~/.zshrc   # bash/fish: see mise docs
+mise trust && mise install                       # installs go, golangci-lint, tailwindcss
+```
+
+Then:
+
 ```sh
 make build    # compile cmd/northwatch
 make test     # run unit tests
 make vet      # go vet
-make lint     # golangci-lint (must be installed)
+make lint     # golangci-lint
+make css      # compile Tailwind CSS
 make run      # build and run
 ```
 
