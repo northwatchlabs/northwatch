@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/northwatchlabs/northwatch/internal/config"
 	"github.com/northwatchlabs/northwatch/internal/server"
 	"github.com/northwatchlabs/northwatch/internal/store"
 )
@@ -53,12 +54,24 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "Subcommands:")
 	fmt.Fprintln(os.Stderr, "  serve    Run the status-page HTTP server (default)")
 	fmt.Fprintln(os.Stderr, "  migrate  Apply pending database migrations and exit")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "serve flags:")
+	fmt.Fprintln(os.Stderr, "  --addr             HTTP listen address (default :8080)")
+	fmt.Fprintln(os.Stderr, "  --db               SQLite database file path (default ./northwatch.db)")
+	fmt.Fprintln(os.Stderr, "  --config           Path to YAML component config (default northwatch.yaml)")
+	fmt.Fprintln(os.Stderr, "  --allow-deactivate Allow boot to deactivate components no longer in --config")
 }
 
 func serveCmd(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	addr := fs.String("addr", envOr("NORTHWATCH_ADDR", defaultAddr), "HTTP listen address")
 	dbPath := fs.String("db", envOr("NORTHWATCH_DB", defaultDB), "SQLite database file path")
+	configPath := fs.String("config",
+		envOr("NORTHWATCH_CONFIG", "northwatch.yaml"),
+		"Path to YAML config declaring watched components")
+	allowDeactivate := fs.Bool("allow-deactivate",
+		envOrBool("NORTHWATCH_ALLOW_DEACTIVATE", false),
+		"Allow boot to deactivate components no longer in --config")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -80,6 +93,10 @@ func serveCmd(args []string) int {
 	if err := st.Migrate(ctx); err != nil {
 		logger.Error("migrate failed", "err", err)
 		return 1
+	}
+
+	if code := runConfigSync(ctx, st, *configPath, *allowDeactivate, logger); code != 0 {
+		return code
 	}
 
 	h, err := server.New(logger, st)
@@ -152,6 +169,78 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envOrBool reads a bool-ish env var. "1", "true", "yes"
+// (case-insensitive) → true; "0", "false", "no" and any other
+// recognized-but-explicit value → false. Unset or empty → def
+// (empty is treated as unset to match standard shell convention,
+// so `VAR=` doesn't silently flip a default).
+func envOrBool(key string, def bool) bool {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	switch strings.ToLower(v) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
+// runConfigSync loads configPath, translates Specs into ComponentSpecs,
+// and calls SyncComponents. Returns 0 on success or a non-zero exit
+// code on any failure (the matching error is already logged). Pulled
+// out of serveCmd so it's testable without starting the HTTP server.
+func runConfigSync(
+	ctx context.Context,
+	st store.Store,
+	configPath string,
+	allowDeactivate bool,
+	logger *slog.Logger,
+) int {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		logger.Error("config load failed", "err", err, "path", configPath)
+		return 1
+	}
+
+	specs := make([]store.ComponentSpec, 0, len(cfg.Components))
+	for _, c := range cfg.Components {
+		dn := c.DisplayName
+		if dn == "" {
+			dn = c.Name
+		}
+		specs = append(specs, store.ComponentSpec{
+			Kind:        c.Kind,
+			Namespace:   c.Namespace,
+			Name:        c.Name,
+			DisplayName: dn,
+		})
+	}
+
+	deactivated, err := st.SyncComponents(ctx, specs, allowDeactivate)
+	var refused *store.DeactivationRefusedError
+	if errors.As(err, &refused) {
+		logger.Error("refusing to deactivate components without --allow-deactivate",
+			"would_deactivate", len(refused.IDs),
+			"ids", refused.IDs,
+			"config", configPath,
+			"hint", "verify the config is correct; re-run with --allow-deactivate to confirm",
+		)
+		return 1
+	}
+	if err != nil {
+		logger.Error("sync components failed", "err", err)
+		return 1
+	}
+	logger.Info("components synced",
+		"active", len(specs),
+		"deactivated", deactivated,
+		"config", configPath,
+	)
+	return 0
 }
 
 func normalizeAddr(addr string) string {

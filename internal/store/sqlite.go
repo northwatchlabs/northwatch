@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/northwatchlabs/northwatch/internal/component"
@@ -66,6 +68,14 @@ ON CONFLICT(id) DO UPDATE SET
 // UpsertComponent inserts or updates a component. The store stamps
 // updated_at; the caller passes Kind/Namespace/Name/DisplayName/Status.
 // Empty Status defaults to StatusUnknown.
+//
+// Ownership note: UpsertComponent is the reconciler's tool — it
+// overwrites status and bumps updated_at on every call. It does NOT
+// touch the active flag, which is owned by SyncComponents (the
+// config-driven boot path). A reconciler calling UpsertComponent on
+// a soft-deactivated row will update its status silently but the
+// row will stay hidden from user-facing views until config returns
+// it to active.
 func (s *SQLite) UpsertComponent(ctx context.Context, c component.Component) error {
 	if c.Status == "" {
 		c.Status = component.StatusUnknown
@@ -105,6 +115,7 @@ func (s *SQLite) GetComponent(ctx context.Context, id string) (component.Compone
 const stmtListComponents = `
 SELECT kind, namespace, name, display_name, status, updated_at
 FROM components
+WHERE active = 1
 ORDER BY kind, namespace, name;
 `
 
@@ -133,6 +144,185 @@ func (s *SQLite) ListComponents(ctx context.Context) ([]component.Component, err
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// SyncComponents — see Store interface for contract.
+//
+// Implementation contract: the entire sync (BEGIN IMMEDIATE, the
+// would-deactivate SELECT, every INSERT ... ON CONFLICT, the
+// deactivation UPDATE, and the final COMMIT or ROLLBACK) runs on a
+// single *sql.Conn checked out of the pool. The pool is sized to 8
+// (see OpenSQLite), so any statement routed through s.db.Exec* or
+// s.db.Query* could land on a different connection that does not
+// hold the IMMEDIATE lock — which would silently break both the
+// atomicity guarantee and the gate rollback. Stay on `conn`.
+func (s *SQLite) SyncComponents(ctx context.Context, specs []ComponentSpec, allowDeactivate bool) (int, error) {
+	// 1. Pre-check duplicate IDs in the input.
+	if dup, ok := findDuplicateID(specs); ok {
+		return 0, fmt.Errorf("store: duplicate component id in specs: %q", dup)
+	}
+
+	// 2. Check out a connection and acquire a RESERVED write lock
+	// for the lifetime of the sync.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("store: acquire conn: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return 0, fmt.Errorf("store: begin immediate: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			// Use Background so a cancelled parent ctx can't
+			// prevent rollback.
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+
+	// 3. Compute the would-deactivate set inside the tx.
+	missingIDs, err := selectMissingActiveIDs(ctx, conn, specs)
+	if err != nil {
+		return 0, fmt.Errorf("store: compute deactivation set: %w", err)
+	}
+
+	// 4. Gate.
+	if len(missingIDs) > 0 && !allowDeactivate {
+		return 0, &DeactivationRefusedError{IDs: missingIDs}
+	}
+
+	// 5. Upsert all specs.
+	now := time.Now().UTC().Unix()
+	for _, sp := range specs {
+		if _, err := conn.ExecContext(ctx, stmtSyncUpsert,
+			sp.Kind, sp.Namespace, sp.Name, sp.DisplayName, now,
+		); err != nil {
+			return 0, fmt.Errorf("store: upsert %s/%s/%s: %w",
+				sp.Kind, sp.Namespace, sp.Name, err)
+		}
+	}
+
+	// 6. Predicate-based deactivation. Re-evaluating the predicate
+	// at UPDATE time (rather than using the step-3 ID list) is
+	// belt-and-suspenders correctness in case anything ran during
+	// the tx that changed the active set.
+	deactivated := 0
+	if len(missingIDs) > 0 {
+		query, args := buildDeactivateSQL(specs)
+		res, err := conn.ExecContext(ctx, query, args...)
+		if err != nil {
+			return 0, fmt.Errorf("store: deactivate: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("store: rows affected: %w", err)
+		}
+		deactivated = int(n)
+	}
+
+	// 7. Commit.
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return 0, fmt.Errorf("store: commit: %w", err)
+	}
+	committed = true
+	return deactivated, nil
+}
+
+// stmtSyncUpsert: INSERT with ON CONFLICT updating display_name and
+// active. Status is NOT in the SET clause, so existing rows keep
+// their status across config syncs. active=1 ensures a returning
+// component is re-activated.
+//
+// updated_at is intentionally omitted from the SET clause too:
+// updated_at tracks "when the status last changed," not "when
+// config was synced" or "when a component was re-activated." A
+// pure rename through config should not bump it. Contrast with
+// stmtUpsertComponent above, which is the reconciler's tool and
+// always bumps updated_at because the reconciler IS the source of
+// status changes.
+const stmtSyncUpsert = `
+INSERT INTO components (kind, namespace, name, display_name, status, active, updated_at)
+VALUES (?, ?, ?, ?, 'unknown', 1, ?)
+ON CONFLICT(id) DO UPDATE SET
+  display_name = excluded.display_name,
+  active       = 1;
+`
+
+func findDuplicateID(specs []ComponentSpec) (string, bool) {
+	seen := make(map[string]struct{}, len(specs))
+	for _, sp := range specs {
+		id := sp.Kind + "/" + sp.Namespace + "/" + sp.Name
+		if _, ok := seen[id]; ok {
+			return id, true
+		}
+		seen[id] = struct{}{}
+	}
+	return "", false
+}
+
+// selectMissingActiveIDs returns the IDs of currently-active rows
+// whose IDs are not in specs. Runs on the open conn within the tx.
+func selectMissingActiveIDs(ctx context.Context, conn *sql.Conn, specs []ComponentSpec) ([]string, error) {
+	if len(specs) == 0 {
+		rows, err := conn.QueryContext(ctx,
+			`SELECT id FROM components WHERE active = 1 ORDER BY id`)
+		if err != nil {
+			return nil, err
+		}
+		return scanIDs(rows)
+	}
+	placeholders, args := inListFromSpecs(specs)
+	query := `SELECT id FROM components WHERE active = 1 AND id NOT IN (` +
+		placeholders + `) ORDER BY id`
+	rows, err := conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanIDs(rows)
+}
+
+func scanIDs(rows *sql.Rows) ([]string, error) {
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// inListFromSpecs produces "?,?,?" placeholders and matching arg
+// slice (one arg per spec, the spec's computed id).
+func inListFromSpecs(specs []ComponentSpec) (string, []any) {
+	if len(specs) == 0 {
+		return "", nil
+	}
+	parts := make([]string, len(specs))
+	args := make([]any, len(specs))
+	for i, sp := range specs {
+		parts[i] = "?"
+		args[i] = sp.Kind + "/" + sp.Namespace + "/" + sp.Name
+	}
+	return strings.Join(parts, ","), args
+}
+
+// buildDeactivateSQL: UPDATE active=0 WHERE active=1 AND id NOT IN (...).
+// Empty specs slice → no placeholders; predicate becomes
+// "WHERE active=1" (every active row). This is the "wipe the
+// watched set" path used when config legitimately declares zero
+// components; selectMissingActiveIDs has the symmetric branch.
+func buildDeactivateSQL(specs []ComponentSpec) (string, []any) {
+	if len(specs) == 0 {
+		return `UPDATE components SET active = 0 WHERE active = 1`, nil
+	}
+	placeholders, args := inListFromSpecs(specs)
+	return `UPDATE components SET active = 0 WHERE active = 1 AND id NOT IN (` +
+		placeholders + `)`, args
 }
 
 func dsnFromPath(p string) string {

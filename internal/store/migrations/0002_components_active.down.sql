@@ -1,0 +1,12 @@
+-- WARNING: this migration is destructive in a specific way that
+-- isn't a SQL error and won't be caught by the migrate tool.
+--
+-- Dropping the `active` column erases the distinction between
+-- watched and soft-deactivated components. If anyone re-applies
+-- the 0002 up migration after a down, every previously
+-- soft-deactivated row will be re-seeded with active=1 (the
+-- column's DEFAULT) and silently reappear in the status page and
+-- /api/components. Operators recovering from a bad deploy should
+-- export the active-flag state before downgrading, or restore
+-- from a pre-deploy backup.
+ALTER TABLE components DROP COLUMN active;

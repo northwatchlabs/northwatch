@@ -1,0 +1,3 @@
+ALTER TABLE components
+  ADD COLUMN active INTEGER NOT NULL DEFAULT 1
+  CHECK (active IN (0, 1));
