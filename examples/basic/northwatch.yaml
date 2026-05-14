@@ -1,0 +1,13 @@
+components:
+  - kind: Deployment
+    namespace: default
+    name: api-gateway
+    displayName: "API Gateway"
+  - kind: HelmRelease
+    namespace: flux-system
+    name: cert-manager
+    displayName: "Cert Manager"
+  - kind: Application
+    namespace: argocd
+    name: payments
+    displayName: "Payments Service"
