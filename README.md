@@ -126,9 +126,28 @@ with [mise](https://mise.jdx.dev/). Install once, then trust and
 install the project's tools:
 
 ```sh
-brew install mise                                # or see https://mise.jdx.dev/installing-mise.html
-echo 'eval "$(mise activate zsh)"' >> ~/.zshrc   # bash/fish: see mise docs
-mise trust && mise install                       # installs go, golangci-lint, tailwindcss, kind, kubectl, kubectx, flux
+brew install mise   # or see https://mise.jdx.dev/installing-mise.html
+```
+
+Activate `mise` in your shell so its shims land on `$PATH`. Pick the
+line for your shell and append it to your rc file:
+
+```sh
+# zsh
+echo 'eval "$(mise activate zsh)"' >> ~/.zshrc
+
+# bash
+echo 'eval "$(mise activate bash)"' >> ~/.bashrc
+
+# fish
+echo 'mise activate fish | source' >> ~/.config/fish/config.fish
+```
+
+Open a new shell (or `source` the rc file), then install the
+project's tools:
+
+```sh
+mise trust && mise install   # installs go, golangci-lint, tailwindcss, kind, kubectl, kubectx, flux
 ```
 
 Then:
