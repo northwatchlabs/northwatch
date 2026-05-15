@@ -215,3 +215,31 @@ func TestRunConfigSync_DefaultsDisplayNameToName(t *testing.T) {
 		t.Errorf("DisplayName = %q, want %q (defaulted to Name)", got.DisplayName, "api")
 	}
 }
+
+func TestServeCmd_NoClusterShortCircuit(t *testing.T) {
+	// Verify that --no-cluster causes serve setup to NOT attempt cluster
+	// connectivity. We test this by running just the cluster-init step
+	// in isolation via the helper exported for testing below.
+	//
+	// The full serveCmd starts an HTTP server, so we can't drive it
+	// directly in a unit test. Instead, runClusterInit (extracted from
+	// serveCmd in this PR) is the testable unit.
+
+	logger := testLogger()
+	ctx := context.Background()
+
+	// --no-cluster set → returns (nil, nil) without touching kubeconfig.
+	kc, err := runClusterInit(ctx, true, "", "", logger)
+	if err != nil {
+		t.Fatalf("--no-cluster: err = %v, want nil", err)
+	}
+	if kc != nil {
+		t.Errorf("--no-cluster: kc = %v, want nil", kc)
+	}
+
+	// --no-cluster unset + bad --kubeconfig path → error.
+	_, err = runClusterInit(ctx, false, "/does/not/exist-northwatch-test", "", logger)
+	if err == nil {
+		t.Fatal("bad kubeconfig: got nil err, want error")
+	}
+}
