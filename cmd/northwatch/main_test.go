@@ -88,12 +88,12 @@ func TestRunConfigSync_NoDeactivationsNoFlagNeeded(t *testing.T) {
 	cfgPath := writeConfig(t, cfgAB)
 
 	// Initial run seeds both. No deactivations.
-	code := runConfigSync(ctx, st, cfgPath, false, testLogger())
+	_, code := runConfigSync(ctx, st, cfgPath, false, testLogger())
 	if code != 0 {
 		t.Errorf("code = %d, want 0", code)
 	}
 	// Second run with same config — still no deactivations, no flag needed.
-	code = runConfigSync(ctx, st, cfgPath, false, testLogger())
+	_, code = runConfigSync(ctx, st, cfgPath, false, testLogger())
 	if code != 0 {
 		t.Errorf("second code = %d, want 0", code)
 	}
@@ -104,12 +104,12 @@ func TestRunConfigSync_RefusesDeactivationWithoutFlag(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed both via cfgAB.
-	if code := runConfigSync(ctx, st, writeConfig(t, cfgAB), false, testLogger()); code != 0 {
+	if _, code := runConfigSync(ctx, st, writeConfig(t, cfgAB), false, testLogger()); code != 0 {
 		t.Fatalf("seed: code = %d", code)
 	}
 
 	// Now sync with cfgAOnly (b absent) and no flag — must refuse.
-	code := runConfigSync(ctx, st, writeConfig(t, cfgAOnly), false, testLogger())
+	_, code := runConfigSync(ctx, st, writeConfig(t, cfgAOnly), false, testLogger())
 	if code != 1 {
 		t.Errorf("code = %d, want 1", code)
 	}
@@ -128,11 +128,11 @@ func TestRunConfigSync_AllowsDeactivationWithFlag(t *testing.T) {
 	st := testStoreWithMigrate(t)
 	ctx := context.Background()
 
-	if code := runConfigSync(ctx, st, writeConfig(t, cfgAB), false, testLogger()); code != 0 {
+	if _, code := runConfigSync(ctx, st, writeConfig(t, cfgAB), false, testLogger()); code != 0 {
 		t.Fatalf("seed: code = %d", code)
 	}
 
-	code := runConfigSync(ctx, st, writeConfig(t, cfgAOnly), true, testLogger())
+	_, code := runConfigSync(ctx, st, writeConfig(t, cfgAOnly), true, testLogger())
 	if code != 0 {
 		t.Errorf("code = %d, want 0", code)
 	}
@@ -148,7 +148,7 @@ func TestRunConfigSync_AllowsDeactivationWithFlag(t *testing.T) {
 
 func TestRunConfigSync_MissingConfig(t *testing.T) {
 	st := testStoreWithMigrate(t)
-	code := runConfigSync(context.Background(), st, "/does/not/exist.yaml", false, testLogger())
+	_, code := runConfigSync(context.Background(), st, "/does/not/exist.yaml", false, testLogger())
 	if code != 1 {
 		t.Errorf("code = %d, want 1", code)
 	}
@@ -202,7 +202,7 @@ func TestRunConfigSync_DefaultsDisplayNameToName(t *testing.T) {
 	st := testStoreWithMigrate(t)
 	ctx := context.Background()
 
-	code := runConfigSync(ctx, st, writeConfig(t, cfgNoDN), false, testLogger())
+	_, code := runConfigSync(ctx, st, writeConfig(t, cfgNoDN), false, testLogger())
 	if code != 0 {
 		t.Fatalf("code = %d, want 0", code)
 	}

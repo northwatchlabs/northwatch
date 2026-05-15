@@ -1,0 +1,40 @@
+# Sample workload for the killer-demo flow.
+#
+# Pairs with northwatch.yaml in this directory: the watched component
+# "Deployment/default/api-gateway" matches this Deployment. Apply this
+# to any cluster, then run:
+#
+#   ./northwatch serve --config examples/basic/northwatch.yaml
+#
+# and the status page should show "API Gateway" as operational. Scale
+# to zero with `kubectl scale deploy/api-gateway --replicas=0` to
+# watch the component flip to "down".
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: default
+  labels:
+    app: api-gateway
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: api-gateway
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
