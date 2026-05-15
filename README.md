@@ -65,7 +65,7 @@ controllers and apply a real release:
 flux --context kind-nw-demo install \
     --components=source-controller,helm-controller
 
-kubectl --context kind-nw-demo apply -f - <<'EOF'
+bash -c "kubectl --context kind-nw-demo apply -f - <<'EOF'
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: HelmRepository
 metadata: { name: podinfo, namespace: default }
@@ -84,6 +84,7 @@ spec:
       version: '6.x'
       sourceRef: { kind: HelmRepository, name: podinfo }
 EOF
+"
 ```
 
 Point a config entry at `HelmRelease/default/podinfo`, restart
