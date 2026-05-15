@@ -108,7 +108,8 @@ func serveCmd(args []string) int {
 		return 1
 	}
 
-	if code := runConfigSync(ctx, st, *configPath, *allowDeactivate, logger); code != 0 {
+	cfg, code := runConfigSync(ctx, st, *configPath, *allowDeactivate, logger)
+	if code != 0 {
 		return code
 	}
 
@@ -117,7 +118,6 @@ func serveCmd(args []string) int {
 		logger.Error("kubernetes client init failed", "err", err)
 		return 1
 	}
-	_ = kc // Consumed by watchers (#6+); placeholder until then.
 
 	h, err := server.New(logger, st)
 	if err != nil {
@@ -131,11 +131,20 @@ func serveCmd(args []string) int {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	errCh := make(chan error, 1)
+	// errCh is sized for every long-lived goroutine that can return
+	// an error during steady-state: the HTTP server, and optionally
+	// the Deployment watcher when --no-cluster is not set.
+	errCh := make(chan error, 2)
 	go func() {
 		logger.Info("listening", "addr", srv.Addr, "db", *dbPath)
 		errCh <- srv.ListenAndServe()
 	}()
+	if kc != nil {
+		depWatcher := watcher.NewDeploymentWatcher(kc.Clientset, st, cfg.Components, logger)
+		go func() {
+			errCh <- depWatcher.Start(ctx)
+		}()
+	}
 
 	select {
 	case err := <-errCh:
@@ -210,20 +219,22 @@ func envOrBool(key string, def bool) bool {
 }
 
 // runConfigSync loads configPath, translates Specs into ComponentSpecs,
-// and calls SyncComponents. Returns 0 on success or a non-zero exit
-// code on any failure (the matching error is already logged). Pulled
-// out of serveCmd so it's testable without starting the HTTP server.
+// and calls SyncComponents. Returns the loaded config (so callers can
+// hand it to downstream consumers like the K8s watcher) and an exit
+// code: 0 on success, non-zero on any failure (the matching error is
+// already logged). On non-zero, the returned config is nil. Pulled out
+// of serveCmd so it's testable without starting the HTTP server.
 func runConfigSync(
 	ctx context.Context,
 	st store.Store,
 	configPath string,
 	allowDeactivate bool,
 	logger *slog.Logger,
-) int {
+) (*config.File, int) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		logger.Error("config load failed", "err", err, "path", configPath)
-		return 1
+		return nil, 1
 	}
 
 	specs := make([]store.ComponentSpec, 0, len(cfg.Components))
@@ -249,18 +260,18 @@ func runConfigSync(
 			"config", configPath,
 			"hint", "verify the config is correct; re-run with --allow-deactivate to confirm",
 		)
-		return 1
+		return nil, 1
 	}
 	if err != nil {
 		logger.Error("sync components failed", "err", err)
-		return 1
+		return nil, 1
 	}
 	logger.Info("components synced",
 		"active", len(specs),
 		"deactivated", deactivated,
 		"config", configPath,
 	)
-	return 0
+	return cfg, 0
 }
 
 // runClusterInit constructs the shared watcher.Client unless
