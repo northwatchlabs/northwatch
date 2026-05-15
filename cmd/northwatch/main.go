@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"k8s.io/client-go/dynamic"
+
 	"github.com/northwatchlabs/northwatch/internal/config"
 	"github.com/northwatchlabs/northwatch/internal/server"
 	"github.com/northwatchlabs/northwatch/internal/store"
@@ -131,10 +133,14 @@ func serveCmd(args []string) int {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// errCh is sized for every long-lived goroutine that can return
-	// an error during steady-state: the HTTP server, and optionally
-	// the Deployment watcher when --no-cluster is not set.
-	errCh := make(chan error, 2)
+	// errCh carries unrecoverable errors from any long-lived
+	// goroutine. Clean shutdowns (Start returning nil after
+	// ctx.Done) are NOT forwarded: an erroneous nil send could race
+	// the <-ctx.Done() arm below and let serveCmd return without
+	// calling srv.Shutdown. Sized for both watchers plus the HTTP
+	// server so a real failure can't block its sender during the
+	// shutdown window.
+	errCh := make(chan error, 3)
 	go func() {
 		logger.Info("listening", "addr", srv.Addr, "db", *dbPath)
 		errCh <- srv.ListenAndServe()
@@ -142,8 +148,17 @@ func serveCmd(args []string) int {
 	if kc != nil {
 		depWatcher := watcher.NewDeploymentWatcher(kc.Clientset, st, cfg.Components, logger)
 		go func() {
-			errCh <- depWatcher.Start(ctx)
+			if err := depWatcher.Start(ctx); err != nil {
+				errCh <- err
+			}
 		}()
+		if hrWatcher := buildHelmReleaseWatcher(ctx, kc, st, cfg.Components, logger); hrWatcher != nil {
+			go func() {
+				if err := hrWatcher.Start(ctx); err != nil {
+					errCh <- err
+				}
+			}()
+		}
 	}
 
 	select {
@@ -295,6 +310,36 @@ func runClusterInit(
 		KubeContext:    kubeContext,
 		Logger:         logger,
 	})
+}
+
+// buildHelmReleaseWatcher probes for the Flux HelmRelease CRD and
+// constructs the watcher only when it's present. Returns nil when
+// the CRD is missing — the cluster just doesn't run Flux, which is
+// expected on non-GitOps clusters. A probe error is logged but
+// otherwise treated as "absent" so a transient discovery failure
+// doesn't take serve down.
+func buildHelmReleaseWatcher(
+	ctx context.Context,
+	kc *watcher.Client,
+	st store.Store,
+	specs []config.Spec,
+	logger *slog.Logger,
+) *watcher.HelmReleaseWatcher {
+	present, err := watcher.HelmReleaseCRDPresent(ctx, kc.Config)
+	if err != nil {
+		logger.Warn("helmrelease CRD probe failed; skipping watcher", "err", err)
+		return nil
+	}
+	if !present {
+		logger.Info("Flux CRDs not present, skipping helmrelease watcher")
+		return nil
+	}
+	dyn, err := dynamic.NewForConfig(kc.Config)
+	if err != nil {
+		logger.Warn("dynamic client init failed; skipping helmrelease watcher", "err", err)
+		return nil
+	}
+	return watcher.NewHelmReleaseWatcher(dyn, st, specs, logger)
 }
 
 func normalizeAddr(addr string) string {
