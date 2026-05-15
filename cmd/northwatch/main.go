@@ -17,6 +17,7 @@ import (
 	"github.com/northwatchlabs/northwatch/internal/config"
 	"github.com/northwatchlabs/northwatch/internal/server"
 	"github.com/northwatchlabs/northwatch/internal/store"
+	"github.com/northwatchlabs/northwatch/internal/watcher"
 )
 
 const (
@@ -60,6 +61,9 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  --db               SQLite database file path (default ./northwatch.db)")
 	fmt.Fprintln(os.Stderr, "  --config           Path to YAML component config (default northwatch.yaml)")
 	fmt.Fprintln(os.Stderr, "  --allow-deactivate Allow boot to deactivate components no longer in --config")
+	fmt.Fprintln(os.Stderr, "  --kubeconfig       Explicit kubeconfig path (overrides in-cluster credentials)")
+	fmt.Fprintln(os.Stderr, "  --kube-context     Context within the resolved kubeconfig")
+	fmt.Fprintln(os.Stderr, "  --no-cluster       Skip cluster connectivity (local-only run)")
 }
 
 func serveCmd(args []string) int {
@@ -72,6 +76,15 @@ func serveCmd(args []string) int {
 	allowDeactivate := fs.Bool("allow-deactivate",
 		envOrBool("NORTHWATCH_ALLOW_DEACTIVATE", false),
 		"Allow boot to deactivate components no longer in --config")
+	kubeconfigPath := fs.String("kubeconfig",
+		envOr("NORTHWATCH_KUBECONFIG", ""),
+		"Explicit kubeconfig path (overrides in-cluster credentials)")
+	kubeContext := fs.String("kube-context",
+		envOr("NORTHWATCH_KUBE_CONTEXT", ""),
+		"Context within the resolved kubeconfig")
+	noCluster := fs.Bool("no-cluster",
+		envOrBool("NORTHWATCH_NO_CLUSTER", false),
+		"Skip cluster connectivity (local-only run)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -98,6 +111,13 @@ func serveCmd(args []string) int {
 	if code := runConfigSync(ctx, st, *configPath, *allowDeactivate, logger); code != 0 {
 		return code
 	}
+
+	kc, err := runClusterInit(ctx, *noCluster, *kubeconfigPath, *kubeContext, logger)
+	if err != nil {
+		logger.Error("kubernetes client init failed", "err", err)
+		return 1
+	}
+	_ = kc // Consumed by watchers (#6+); placeholder until then.
 
 	h, err := server.New(logger, st)
 	if err != nil {
@@ -241,6 +261,29 @@ func runConfigSync(
 		"config", configPath,
 	)
 	return 0
+}
+
+// runClusterInit constructs the shared watcher.Client unless
+// --no-cluster is set. Pulled out of serveCmd so tests can exercise
+// the --no-cluster short-circuit without starting the HTTP server.
+// Returns (nil, nil) when --no-cluster is true. Errors are logged by
+// the caller.
+func runClusterInit(
+	ctx context.Context,
+	noCluster bool,
+	kubeconfigPath string,
+	kubeContext string,
+	logger *slog.Logger,
+) (*watcher.Client, error) {
+	if noCluster {
+		logger.Info("cluster watching disabled (--no-cluster)")
+		return nil, nil
+	}
+	return watcher.NewClient(ctx, watcher.Options{
+		KubeconfigPath: kubeconfigPath,
+		KubeContext:    kubeContext,
+		Logger:         logger,
+	})
 }
 
 func normalizeAddr(addr string) string {

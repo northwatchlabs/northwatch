@@ -40,7 +40,7 @@ install the project's tools:
 ```sh
 brew install mise                                # or see https://mise.jdx.dev/installing-mise.html
 echo 'eval "$(mise activate zsh)"' >> ~/.zshrc   # bash/fish: see mise docs
-mise trust && mise install                       # installs go, golangci-lint, tailwindcss
+mise trust && mise install                       # installs go, golangci-lint, tailwindcss, kind, kubectl, kubectx
 ```
 
 Then:
