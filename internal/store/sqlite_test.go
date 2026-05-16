@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/northwatchlabs/northwatch/internal/component"
+	"github.com/northwatchlabs/northwatch/internal/incident"
 	"github.com/northwatchlabs/northwatch/internal/store"
 )
 
@@ -613,6 +614,144 @@ func TestSyncComponents_DeactivatedCountIgnoresAlreadyInactive(t *testing.T) {
 	}
 }
 
+func TestCreateIncidentInsertsBothRows(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	seedComponent(t, s, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	inc := incident.Incident{
+		ID:          "01HXINC0000000000000000001",
+		ComponentID: "Deployment/default/web",
+		Title:       "Pods crashlooping",
+		Status:      incident.StatusInvestigating,
+		OpenedAt:    now,
+	}
+	upd := incident.Update{
+		ID:         "01HXUPD0000000000000000001",
+		IncidentID: inc.ID,
+		Body:       inc.Title,
+		Status:     incident.StatusInvestigating,
+		CreatedAt:  now,
+	}
+
+	if err := s.CreateIncident(ctx, inc, upd); err != nil {
+		t.Fatalf("CreateIncident: %v", err)
+	}
+
+	var incidentCount, updateCount int
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM incidents WHERE id = ?`, inc.ID).Scan(&incidentCount); err != nil {
+		t.Fatalf("count incidents: %v", err)
+	}
+	if incidentCount != 1 {
+		t.Fatalf("incidents row count = %d, want 1", incidentCount)
+	}
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM incident_updates WHERE incident_id = ?`, inc.ID).Scan(&updateCount); err != nil {
+		t.Fatalf("count updates: %v", err)
+	}
+	if updateCount != 1 {
+		t.Fatalf("incident_updates row count = %d, want 1", updateCount)
+	}
+}
+
+func TestCreateIncidentUnknownComponent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	inc := incident.Incident{
+		ID:          "01HXINC0000000000000000002",
+		ComponentID: "Deployment/default/missing",
+		Title:       "nope",
+		Status:      incident.StatusInvestigating,
+		OpenedAt:    now,
+	}
+	upd := incident.Update{
+		ID:         "01HXUPD0000000000000000002",
+		IncidentID: inc.ID,
+		Body:       inc.Title,
+		Status:     incident.StatusInvestigating,
+		CreatedAt:  now,
+	}
+
+	err := s.CreateIncident(ctx, inc, upd)
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("CreateIncident err = %v, want ErrNotFound", err)
+	}
+
+	var n int
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM incidents`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("incidents row count = %d after FK failure, want 0", n)
+	}
+}
+
+func TestCreateIncidentAtomicityRollsBackOnUpdateFailure(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	seedComponent(t, s, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	dupUpdateID := "01HXUPD0000000000000000099"
+
+	first := incident.Incident{
+		ID:          "01HXINC0000000000000000010",
+		ComponentID: "Deployment/default/web",
+		Title:       "first",
+		Status:      incident.StatusInvestigating,
+		OpenedAt:    now,
+	}
+	firstUpd := incident.Update{
+		ID:         dupUpdateID,
+		IncidentID: first.ID,
+		Body:       first.Title,
+		Status:     incident.StatusInvestigating,
+		CreatedAt:  now,
+	}
+	if err := s.CreateIncident(ctx, first, firstUpd); err != nil {
+		t.Fatalf("seed first incident: %v", err)
+	}
+
+	collide := incident.Incident{
+		ID:          "01HXINC0000000000000000011",
+		ComponentID: "Deployment/default/web",
+		Title:       "second",
+		Status:      incident.StatusInvestigating,
+		OpenedAt:    now,
+	}
+	collideUpd := incident.Update{
+		ID:         dupUpdateID, // collision
+		IncidentID: collide.ID,
+		Body:       collide.Title,
+		Status:     incident.StatusInvestigating,
+		CreatedAt:  now,
+	}
+
+	if err := s.CreateIncident(ctx, collide, collideUpd); err == nil {
+		t.Fatal("CreateIncident: want error from duplicate update id, got nil")
+	}
+
+	var n int
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM incidents WHERE id = ?`, collide.ID).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("incidents row count = %d after rollback, want 0", n)
+	}
+}
+
 func TestSyncComponents_RefusalDoesNotApplyUpserts(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -638,5 +777,208 @@ func TestSyncComponents_RefusalDoesNotApplyUpserts(t *testing.T) {
 	}
 	if c.DisplayName != "old" {
 		t.Errorf("DisplayName = %q, want %q (upsert must have rolled back)", c.DisplayName, "old")
+	}
+}
+
+func TestGetActiveIncidentReturnsMostRecent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	seedComponent(t, s, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+
+	mk := func(id string, secs int64) {
+		t.Helper()
+		opened := time.Unix(secs, 0).UTC()
+		if err := s.CreateIncident(ctx,
+			incident.Incident{
+				ID:          id,
+				ComponentID: "Deployment/default/web",
+				Title:       id,
+				Status:      incident.StatusInvestigating,
+				OpenedAt:    opened,
+			},
+			incident.Update{
+				ID:         "u-" + id,
+				IncidentID: id,
+				Body:       id,
+				Status:     incident.StatusInvestigating,
+				CreatedAt:  opened,
+			},
+		); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+	mk("01HXINC00000000000000000A1", 100)
+	mk("01HXINC00000000000000000A2", 300) // latest
+	mk("01HXINC00000000000000000A3", 200)
+
+	got, err := s.GetActiveIncident(ctx)
+	if err != nil {
+		t.Fatalf("GetActiveIncident: %v", err)
+	}
+	if got.ID != "01HXINC00000000000000000A2" {
+		t.Fatalf("GetActiveIncident.ID = %s, want 01HXINC00000000000000000A2", got.ID)
+	}
+}
+
+func TestHasActiveComponentTrueForActive(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedComponent(t, s, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+	ok, err := s.HasActiveComponent(ctx, "Deployment/default/web")
+	if err != nil {
+		t.Fatalf("HasActiveComponent: %v", err)
+	}
+	if !ok {
+		t.Fatalf("HasActiveComponent = false, want true")
+	}
+}
+
+func TestHasActiveComponentFalseForInactive(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedComponent(t, s, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+	if _, err := s.DB().ExecContext(ctx,
+		`UPDATE components SET active = 0 WHERE id = ?`,
+		"Deployment/default/web"); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+	ok, err := s.HasActiveComponent(ctx, "Deployment/default/web")
+	if err != nil {
+		t.Fatalf("HasActiveComponent: %v", err)
+	}
+	if ok {
+		t.Fatalf("HasActiveComponent = true, want false (deactivated)")
+	}
+}
+
+func TestHasActiveComponentFalseForMissing(t *testing.T) {
+	s := newTestStore(t)
+	ok, err := s.HasActiveComponent(context.Background(), "Deployment/default/ghost")
+	if err != nil {
+		t.Fatalf("HasActiveComponent: %v", err)
+	}
+	if ok {
+		t.Fatalf("HasActiveComponent = true, want false (missing)")
+	}
+}
+
+func TestGetActiveIncidentNoneReturnsErrNotFound(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.GetActiveIncident(context.Background())
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetActiveIncident err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestGetIncidentNotFound(t *testing.T) {
+	s := newTestStore(t)
+	_, err := s.GetIncident(context.Background(), "missing")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetIncident err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestListIncidentsExcludesResolvedByDefault(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	seedComponent(t, s, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	active := incident.Incident{
+		ID: "01HXINC0000000000000000B1", ComponentID: "Deployment/default/web",
+		Title: "active", Status: incident.StatusInvestigating, OpenedAt: now,
+	}
+	resolved := incident.Incident{
+		ID: "01HXINC0000000000000000B2", ComponentID: "Deployment/default/web",
+		Title: "resolved", Status: incident.StatusResolved, OpenedAt: now,
+	}
+	mkUpd := func(id string) incident.Update {
+		return incident.Update{
+			ID: "u-" + id, IncidentID: id, Body: "x",
+			Status: incident.StatusInvestigating, CreatedAt: now,
+		}
+	}
+	if err := s.CreateIncident(ctx, active, mkUpd(active.ID)); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	if err := s.CreateIncident(ctx, resolved, mkUpd(resolved.ID)); err != nil {
+		t.Fatalf("seed resolved: %v", err)
+	}
+	// Mark the second one resolved.
+	if _, err := s.DB().ExecContext(ctx,
+		`UPDATE incidents SET resolved_at = ? WHERE id = ?`,
+		now.Unix(), resolved.ID); err != nil {
+		t.Fatalf("mark resolved: %v", err)
+	}
+
+	got, err := s.ListIncidents(ctx, false)
+	if err != nil {
+		t.Fatalf("ListIncidents(false): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != active.ID {
+		t.Fatalf("ListIncidents(false) = %v, want [active]", got)
+	}
+
+	gotAll, err := s.ListIncidents(ctx, true)
+	if err != nil {
+		t.Fatalf("ListIncidents(true): %v", err)
+	}
+	if len(gotAll) != 2 {
+		t.Fatalf("ListIncidents(true) len = %d, want 2", len(gotAll))
+	}
+}
+
+func TestListIncidentsOrderedByOpenedAtDesc(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	seedComponent(t, s, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+
+	mk := func(id string, secs int64) {
+		t.Helper()
+		opened := time.Unix(secs, 0).UTC()
+		_ = s.CreateIncident(ctx,
+			incident.Incident{
+				ID: id, ComponentID: "Deployment/default/web",
+				Title: id, Status: incident.StatusInvestigating, OpenedAt: opened,
+			},
+			incident.Update{
+				ID: "u-" + id, IncidentID: id, Body: id,
+				Status: incident.StatusInvestigating, CreatedAt: opened,
+			},
+		)
+	}
+	mk("01HXINC0000000000000000C1", 100)
+	mk("01HXINC0000000000000000C2", 300)
+	mk("01HXINC0000000000000000C3", 200)
+
+	got, err := s.ListIncidents(ctx, false)
+	if err != nil {
+		t.Fatalf("ListIncidents: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	wantOrder := []string{
+		"01HXINC0000000000000000C2",
+		"01HXINC0000000000000000C3",
+		"01HXINC0000000000000000C1",
+	}
+	for i, w := range wantOrder {
+		if got[i].ID != w {
+			t.Errorf("got[%d].ID = %s, want %s", i, got[i].ID, w)
+		}
 	}
 }
