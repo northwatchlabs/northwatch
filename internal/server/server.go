@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/northwatchlabs/northwatch/internal/component"
+	"github.com/northwatchlabs/northwatch/internal/incident"
 	"github.com/northwatchlabs/northwatch/internal/store"
 	"github.com/northwatchlabs/northwatch/internal/ui"
 )
@@ -45,8 +46,11 @@ func New(logger *slog.Logger, st store.Store) (http.Handler, error) {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 
+	incSvc := incident.NewService(st, logger)
+
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServerFS(staticFS)))
 	r.Get("/api/components", apiComponentsHandler(st, logger))
+	r.Get("/api/incidents", apiIncidentsHandler(incSvc, logger))
 	r.Get("/", indexHandler(tmpl, st, logger))
 
 	return r, nil

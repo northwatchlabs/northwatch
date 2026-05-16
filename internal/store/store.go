@@ -9,10 +9,13 @@ import (
 	"fmt"
 
 	"github.com/northwatchlabs/northwatch/internal/component"
+	"github.com/northwatchlabs/northwatch/internal/incident"
 )
 
 // ErrNotFound is returned by Get* methods when no row matches.
-var ErrNotFound = errors.New("store: not found")
+// It is the same sentinel as incident.ErrNotFound — they share a
+// single value so callers can use either reference with errors.Is.
+var ErrNotFound = incident.ErrNotFound
 
 // ErrSchemaTooNew is returned by Migrate when the on-disk schema
 // version is higher than the maximum migration embedded in this
@@ -72,6 +75,12 @@ type Store interface {
 	// ErrNotFound if no row matches.
 	GetComponent(ctx context.Context, id string) (component.Component, error)
 
+	// HasActiveComponent returns true if a component with the given ID
+	// exists AND has active = 1. Returns (false, nil) when the row is
+	// missing or soft-deactivated. Storage errors are returned as
+	// (false, err).
+	HasActiveComponent(ctx context.Context, id string) (bool, error)
+
 	// UpsertComponent inserts or updates by id. The store computes id
 	// from (Kind, Namespace, Name) — SQLite uses a STORED generated
 	// column — and stamps updated_at to time.Now().UTC().Unix().
@@ -95,4 +104,24 @@ type Store interface {
 	// been deactivated and rolls back. Returns the count of rows
 	// newly transitioned from active=1 to active=0 in this call.
 	SyncComponents(ctx context.Context, specs []ComponentSpec, allowDeactivate bool) (deactivated int, err error)
+
+	// CreateIncident inserts the incident and its initial
+	// incident_updates row in a single BEGIN IMMEDIATE transaction.
+	// Returns ErrNotFound if inc.ComponentID does not match a row in
+	// the components table (FK violation is translated). Both rows
+	// land or neither does.
+	CreateIncident(ctx context.Context, inc incident.Incident, firstUpdate incident.Update) error
+
+	// GetIncident returns the incident with the given ID, or
+	// ErrNotFound.
+	GetIncident(ctx context.Context, id string) (incident.Incident, error)
+
+	// GetActiveIncident returns the most recently opened incident
+	// whose resolved_at IS NULL, or ErrNotFound when none exist.
+	GetActiveIncident(ctx context.Context) (incident.Incident, error)
+
+	// ListIncidents returns incidents ordered by opened_at DESC.
+	// When includeResolved is false, rows with resolved_at IS NOT
+	// NULL are excluded.
+	ListIncidents(ctx context.Context, includeResolved bool) ([]incident.Incident, error)
 }
