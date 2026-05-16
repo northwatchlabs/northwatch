@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/northwatchlabs/northwatch/internal/component"
+	"github.com/northwatchlabs/northwatch/internal/incident"
 	_ "modernc.org/sqlite"
 )
 
@@ -110,6 +111,27 @@ func (s *SQLite) GetComponent(ctx context.Context, id string) (component.Compone
 	c.Status = component.Status(status)
 	c.UpdatedAt = time.Unix(ts, 0).UTC()
 	return c, nil
+}
+
+const stmtHasActiveComponent = `
+SELECT 1 FROM components WHERE id = ? AND active = 1;
+`
+
+// HasActiveComponent returns true iff a row matching id exists with
+// active = 1. The result is intended for guard checks (e.g., the
+// incident service rejecting incident creation against deactivated
+// components). Returns false (not ErrNotFound) for both missing and
+// inactive rows because callers don't need to distinguish.
+func (s *SQLite) HasActiveComponent(ctx context.Context, id string) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx, stmtHasActiveComponent, id).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 const stmtListComponents = `
@@ -338,4 +360,155 @@ func dsnFromPath(p string) string {
 	// `/tmp/db?x=1` would silently open the wrong file and let an
 	// attacker-controlled string override our pragmas.
 	return "file:" + url.PathEscape(p) + "?_pragma=journal_mode(WAL)&" + pragmas
+}
+
+const stmtInsertIncident = `
+INSERT INTO incidents (id, component_id, title, status, opened_at)
+VALUES (?, ?, ?, ?, ?);
+`
+
+const stmtInsertIncidentUpdate = `
+INSERT INTO incident_updates (id, incident_id, body, status, created_at)
+VALUES (?, ?, ?, ?, ?);
+`
+
+// CreateIncident inserts inc and firstUpdate in a single
+// BEGIN IMMEDIATE transaction. The pattern matches SyncComponents:
+// both writes run on a single *sql.Conn that holds the write lock,
+// and a deferred ROLLBACK guard uses context.Background() so a
+// cancelled parent ctx cannot bypass cleanup.
+func (s *SQLite) CreateIncident(ctx context.Context, inc incident.Incident, firstUpdate incident.Update) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("store: acquire conn: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("store: begin immediate: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+
+	if _, err := conn.ExecContext(ctx, stmtInsertIncident,
+		inc.ID, inc.ComponentID, inc.Title, string(inc.Status), inc.OpenedAt.UTC().Unix(),
+	); err != nil {
+		return translateFKAsNotFound(err)
+	}
+	if _, err := conn.ExecContext(ctx, stmtInsertIncidentUpdate,
+		firstUpdate.ID, firstUpdate.IncidentID, firstUpdate.Body,
+		string(firstUpdate.Status), firstUpdate.CreatedAt.UTC().Unix(),
+	); err != nil {
+		return fmt.Errorf("store: insert incident_update: %w", err)
+	}
+
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("store: commit: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// translateFKAsNotFound maps a SQLite FK violation (extended code
+// 787, SQLITE_CONSTRAINT_FOREIGNKEY) into ErrNotFound so callers
+// don't have to parse driver-specific error text. Any other error
+// is returned as-is, wrapped.
+func translateFKAsNotFound(err error) error {
+	if err == nil {
+		return nil
+	}
+	// modernc.org/sqlite returns an error whose Error() string
+	// contains "FOREIGN KEY constraint failed" on FK violation.
+	// String-matching is the documented contract for this driver.
+	if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
+		return ErrNotFound
+	}
+	return fmt.Errorf("store: insert incident: %w", err)
+}
+
+const stmtGetIncident = `
+SELECT id, component_id, title, status, opened_at, resolved_at
+FROM incidents WHERE id = ?;
+`
+
+const stmtGetActiveIncident = `
+SELECT id, component_id, title, status, opened_at, resolved_at
+FROM incidents
+WHERE resolved_at IS NULL
+ORDER BY opened_at DESC
+LIMIT 1;
+`
+
+func (s *SQLite) GetIncident(ctx context.Context, id string) (incident.Incident, error) {
+	row := s.db.QueryRowContext(ctx, stmtGetIncident, id)
+	return scanIncident(row.Scan)
+}
+
+func (s *SQLite) GetActiveIncident(ctx context.Context) (incident.Incident, error) {
+	row := s.db.QueryRowContext(ctx, stmtGetActiveIncident)
+	return scanIncident(row.Scan)
+}
+
+// scanIncident is shared between Get* and List* row scans. The
+// scan argument is row.Scan or rows.Scan so the helper works for
+// both *sql.Row and *sql.Rows.
+func scanIncident(scan func(...any) error) (incident.Incident, error) {
+	var (
+		inc        incident.Incident
+		status     string
+		openedSecs int64
+		resolved   sql.NullInt64
+	)
+	err := scan(&inc.ID, &inc.ComponentID, &inc.Title, &status, &openedSecs, &resolved)
+	if errors.Is(err, sql.ErrNoRows) {
+		return incident.Incident{}, ErrNotFound
+	}
+	if err != nil {
+		return incident.Incident{}, err
+	}
+	inc.Status = incident.Status(status)
+	inc.OpenedAt = time.Unix(openedSecs, 0).UTC()
+	if resolved.Valid {
+		t := time.Unix(resolved.Int64, 0).UTC()
+		inc.ResolvedAt = &t
+	}
+	return inc, nil
+}
+
+const stmtListIncidentsActive = `
+SELECT id, component_id, title, status, opened_at, resolved_at
+FROM incidents WHERE resolved_at IS NULL
+ORDER BY opened_at DESC;
+`
+
+const stmtListIncidentsAll = `
+SELECT id, component_id, title, status, opened_at, resolved_at
+FROM incidents
+ORDER BY opened_at DESC;
+`
+
+func (s *SQLite) ListIncidents(ctx context.Context, includeResolved bool) ([]incident.Incident, error) {
+	stmt := stmtListIncidentsActive
+	if includeResolved {
+		stmt = stmtListIncidentsAll
+	}
+	rows, err := s.db.QueryContext(ctx, stmt)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []incident.Incident
+	for rows.Next() {
+		inc, err := scanIncident(rows.Scan)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, inc)
+	}
+	return out, rows.Err()
 }

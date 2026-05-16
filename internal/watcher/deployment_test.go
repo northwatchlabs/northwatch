@@ -14,6 +14,7 @@ import (
 
 	"github.com/northwatchlabs/northwatch/internal/component"
 	"github.com/northwatchlabs/northwatch/internal/config"
+	"github.com/northwatchlabs/northwatch/internal/incident"
 	"github.com/northwatchlabs/northwatch/internal/store"
 )
 
@@ -57,8 +58,23 @@ func (s *recordStore) UpsertComponent(_ context.Context, c component.Component) 
 	}
 	return nil
 }
+func (s *recordStore) HasActiveComponent(context.Context, string) (bool, error) {
+	return false, nil
+}
 func (s *recordStore) SyncComponents(context.Context, []store.ComponentSpec, bool) (int, error) {
 	return 0, nil
+}
+func (s *recordStore) CreateIncident(context.Context, incident.Incident, incident.Update) error {
+	return nil
+}
+func (s *recordStore) GetIncident(context.Context, string) (incident.Incident, error) {
+	return incident.Incident{}, store.ErrNotFound
+}
+func (s *recordStore) GetActiveIncident(context.Context) (incident.Incident, error) {
+	return incident.Incident{}, store.ErrNotFound
+}
+func (s *recordStore) ListIncidents(context.Context, bool) ([]incident.Incident, error) {
+	return nil, nil
 }
 
 func (s *recordStore) count() int {
