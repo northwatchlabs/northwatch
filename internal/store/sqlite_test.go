@@ -982,3 +982,211 @@ func TestListIncidentsOrderedByOpenedAtDesc(t *testing.T) {
 		}
 	}
 }
+
+// seedActiveIncident creates one active incident with one initial
+// update row. Returns the incident ID and the opened-at timestamp.
+func seedActiveIncident(t *testing.T, s *store.SQLite, incID, compID string) (string, time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	opened := time.Unix(1_700_000_000, 0).UTC()
+	inc := incident.Incident{
+		ID: incID, ComponentID: compID,
+		Title: "boom", Status: incident.StatusInvestigating, OpenedAt: opened,
+	}
+	upd := incident.Update{
+		ID: "u-" + incID, IncidentID: incID, Body: "boom",
+		Status: incident.StatusInvestigating, CreatedAt: opened,
+	}
+	if err := s.CreateIncident(ctx, inc, upd); err != nil {
+		t.Fatalf("seed active incident: %v", err)
+	}
+	return incID, opened
+}
+
+// countIncidentUpdates returns the number of incident_updates rows
+// for a given incident_id.
+func countIncidentUpdates(t *testing.T, s *store.SQLite, incID string) int {
+	t.Helper()
+	var n int
+	row := s.DB().QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM incident_updates WHERE incident_id = ?`, incID)
+	if err := row.Scan(&n); err != nil {
+		t.Fatalf("count incident_updates: %v", err)
+	}
+	return n
+}
+
+func TestResolveIncidentSetsResolvedAtAndAppendsUpdate(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedComponent(t, s, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+	incID, _ := seedActiveIncident(t, s,
+		"01HXINC0000000000000000R1", "Deployment/default/web")
+
+	resolvedAt := time.Unix(1_700_001_000, 0).UTC()
+	updateID := "u-resolve-1"
+
+	got, err := s.ResolveIncident(ctx, incID, resolvedAt, updateID, "Incident resolved.")
+	if err != nil {
+		t.Fatalf("ResolveIncident: %v", err)
+	}
+	if got.Status != incident.StatusResolved {
+		t.Errorf("status = %s, want resolved", got.Status)
+	}
+	if got.ResolvedAt == nil || !got.ResolvedAt.Equal(resolvedAt) {
+		t.Errorf("ResolvedAt = %v, want %v", got.ResolvedAt, resolvedAt)
+	}
+
+	persisted, err := s.GetIncident(ctx, incID)
+	if err != nil {
+		t.Fatalf("GetIncident: %v", err)
+	}
+	if persisted.Status != incident.StatusResolved {
+		t.Errorf("persisted status = %s, want resolved", persisted.Status)
+	}
+	if persisted.ResolvedAt == nil || !persisted.ResolvedAt.Equal(resolvedAt) {
+		t.Errorf("persisted ResolvedAt = %v, want %v", persisted.ResolvedAt, resolvedAt)
+	}
+
+	if n := countIncidentUpdates(t, s, incID); n != 2 {
+		t.Errorf("incident_updates count = %d, want 2 (initial + resolve)", n)
+	}
+
+	var body, status string
+	row := s.DB().QueryRowContext(ctx,
+		`SELECT body, status FROM incident_updates WHERE id = ?`, updateID)
+	if err := row.Scan(&body, &status); err != nil {
+		t.Fatalf("scan resolve update: %v", err)
+	}
+	if body != "Incident resolved." || status != string(incident.StatusResolved) {
+		t.Errorf("resolve update = (body=%q, status=%q), want (\"Incident resolved.\", resolved)", body, status)
+	}
+}
+
+func TestResolveIncidentUnknownReturnsErrNotFound(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.ResolveIncident(ctx, "ghost", time.Now().UTC(),
+		"u-resolve-x", "Incident resolved.")
+	if !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+
+	if n := countIncidentUpdates(t, s, "ghost"); n != 0 {
+		t.Errorf("incident_updates count = %d, want 0", n)
+	}
+}
+
+func TestResolveIncidentAlreadyResolvedIsNoOp(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedComponent(t, s, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+	incID, _ := seedActiveIncident(t, s,
+		"01HXINC0000000000000000R2", "Deployment/default/web")
+
+	firstResolve := time.Unix(1_700_001_000, 0).UTC()
+	if _, err := s.ResolveIncident(ctx, incID, firstResolve,
+		"u-resolve-first", "Incident resolved."); err != nil {
+		t.Fatalf("first resolve: %v", err)
+	}
+
+	secondResolve := time.Unix(1_700_009_999, 0).UTC()
+	secondUpdateID := "u-resolve-second"
+	got, err := s.ResolveIncident(ctx, incID, secondResolve,
+		secondUpdateID, "Incident resolved.")
+	if err != nil {
+		t.Fatalf("second resolve: %v", err)
+	}
+
+	// Returned incident must reflect the *first* resolve.
+	if got.ResolvedAt == nil || !got.ResolvedAt.Equal(firstResolve) {
+		t.Errorf("returned ResolvedAt = %v, want %v (first resolve)", got.ResolvedAt, firstResolve)
+	}
+
+	persisted, err := s.GetIncident(ctx, incID)
+	if err != nil {
+		t.Fatalf("GetIncident: %v", err)
+	}
+	if persisted.ResolvedAt == nil || !persisted.ResolvedAt.Equal(firstResolve) {
+		t.Errorf("persisted ResolvedAt = %v, want %v (unchanged)", persisted.ResolvedAt, firstResolve)
+	}
+
+	// 1 initial + 1 first-resolve = 2 (second resolve must not insert).
+	if n := countIncidentUpdates(t, s, incID); n != 2 {
+		t.Errorf("incident_updates count = %d, want 2 (no-op resolve must not insert)", n)
+	}
+
+	var exists int
+	row := s.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM incident_updates WHERE id = ?`, secondUpdateID)
+	if err := row.Scan(&exists); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if exists != 0 {
+		t.Errorf("second update ID present in incident_updates; want absent")
+	}
+}
+
+func TestResolveIncidentConcurrent(t *testing.T) {
+	// :memory: is private per-conn under modernc.org/sqlite, so two
+	// goroutines acquiring conns from the pool would see different
+	// databases. A real file shares state across the pool.
+	dbPath := t.TempDir() + "/concurrent.db"
+	ctx := context.Background()
+	s, err := store.OpenSQLite(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	seedComponent(t, s, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+	incID, _ := seedActiveIncident(t, s,
+		"01HXINC0000000000000000R3", "Deployment/default/web")
+
+	t1 := time.Unix(1_700_010_000, 0).UTC()
+	t2 := time.Unix(1_700_020_000, 0).UTC()
+
+	type result struct {
+		inc incident.Incident
+		err error
+	}
+	results := make(chan result, 2)
+	go func() {
+		got, err := s.ResolveIncident(ctx, incID, t1, "u-concurrent-1", "Incident resolved.")
+		results <- result{got, err}
+	}()
+	go func() {
+		got, err := s.ResolveIncident(ctx, incID, t2, "u-concurrent-2", "Incident resolved.")
+		results <- result{got, err}
+	}()
+
+	r1 := <-results
+	r2 := <-results
+	if r1.err != nil {
+		t.Errorf("goroutine 1 err: %v", r1.err)
+	}
+	if r2.err != nil {
+		t.Errorf("goroutine 2 err: %v", r2.err)
+	}
+
+	if r1.inc.ResolvedAt == nil || r2.inc.ResolvedAt == nil ||
+		!r1.inc.ResolvedAt.Equal(*r2.inc.ResolvedAt) {
+		t.Errorf("ResolvedAt diverged across concurrent resolvers: %v vs %v",
+			r1.inc.ResolvedAt, r2.inc.ResolvedAt)
+	}
+
+	// 1 initial + exactly 1 resolve = 2.
+	if n := countIncidentUpdates(t, s, incID); n != 2 {
+		t.Errorf("incident_updates count = %d, want 2 (one resolve only)", n)
+	}
+}
