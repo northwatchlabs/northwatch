@@ -76,6 +76,9 @@ func (s *recordStore) GetActiveIncident(context.Context) (incident.Incident, err
 func (s *recordStore) ListIncidents(context.Context, bool) ([]incident.Incident, error) {
 	return nil, nil
 }
+func (s *recordStore) ResolveIncident(context.Context, string, time.Time, string, string) (incident.Incident, error) {
+	return incident.Incident{}, store.ErrNotFound
+}
 
 func (s *recordStore) count() int {
 	s.mu.Lock()

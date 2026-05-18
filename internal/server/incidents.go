@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/northwatchlabs/northwatch/internal/incident"
+	"github.com/northwatchlabs/northwatch/internal/store"
 )
 
 // apiIncident is the JSON wire shape. Kept separate from
@@ -65,10 +68,8 @@ func apiIncidentsHandler(svc *incident.Service, logger *slog.Logger) http.Handle
 	}
 }
 
-// createIncidentHandler serves POST /incidents. NOT registered in
-// server.New in this PR — issue #21 wires it under bearer-token
-// middleware. Exposed via CreateIncidentHandlerForTest so handler
-// tests can invoke it directly via httptest.
+// createIncidentHandler serves POST /incidents. Registered in
+// server.New under the bearer-token middleware.
 func createIncidentHandler(svc *incident.Service, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		dec := json.NewDecoder(r.Body)
@@ -112,10 +113,24 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// CreateIncidentHandlerForTest returns the POST /incidents handler
-// without registering it on a router. Test-only export to support
-// direct httptest invocation while the production wiring remains in
-// #21. Do not use from production code.
-func CreateIncidentHandlerForTest(svc *incident.Service, logger *slog.Logger) http.HandlerFunc {
-	return createIncidentHandler(svc, logger)
+// resolveIncidentHandler serves POST /incidents/{id}/resolve.
+// Idempotent: 200 on success, including the no-op resolve of an
+// already-resolved incident (response body carries the *original*
+// resolvedAt). 404 if the incident does not exist.
+func resolveIncidentHandler(svc *incident.Service, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		inc, err := svc.ResolveIncident(r.Context(), id)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "incident not found")
+			return
+		case err != nil:
+			logger.Error("incidents/resolve: failed", "err", err)
+			http.Error(w, "store error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(toAPIIncident(inc))
+	}
 }

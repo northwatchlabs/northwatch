@@ -18,9 +18,16 @@ import (
 	"github.com/northwatchlabs/northwatch/internal/store"
 )
 
-// newHandler boots an in-memory store, migrates it, optionally seeds
-// components, and returns the wired HTTP handler.
-func newHandler(t *testing.T, seed ...component.Component) http.Handler {
+// testToken is the fixture bearer token used by every write-side
+// test in this file. ≥16 chars so it satisfies the cmd-line
+// validation rule even though tests don't go through cmd parsing.
+const testToken = "test-fixture-token-1234"
+
+// newHandlerWith boots an in-memory store, migrates it, optionally
+// seeds components, and returns the wired HTTP handler + store. The
+// token is passed verbatim into server.New: pass testToken to enable
+// writes, "" to test writes-disabled mode.
+func newHandlerWith(t *testing.T, token string, seed ...component.Component) (http.Handler, *store.SQLite) {
 	t.Helper()
 	ctx := context.Background()
 	st, err := store.OpenSQLite(ctx, ":memory:")
@@ -36,10 +43,19 @@ func newHandler(t *testing.T, seed ...component.Component) http.Handler {
 			t.Fatalf("UpsertComponent: %v", err)
 		}
 	}
-	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)), st)
+	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)), st, token)
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
+	return h, st
+}
+
+// newHandler is the GET-only convenience: token is empty (writes
+// disabled, which GET-only tests never exercise) and the store is
+// discarded.
+func newHandler(t *testing.T, seed ...component.Component) http.Handler {
+	t.Helper()
+	h, _ := newHandlerWith(t, "", seed...)
 	return h
 }
 
@@ -197,7 +213,7 @@ func TestAPIComponents_StoreError(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)),
-		failingStore{Store: real})
+		failingStore{Store: real}, "")
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
@@ -210,30 +226,12 @@ func TestAPIComponents_StoreError(t *testing.T) {
 	}
 }
 
-// newHandlerWithStore is like newHandler but also returns the store
-// so tests can seed incidents (which require a store handle rather
-// than going through any *server.Server exported API).
+// newHandlerWithStore returns the GET-only handler + the store for
+// tests that seed incidents directly. Token is empty (writes
+// disabled).
 func newHandlerWithStore(t *testing.T, seed ...component.Component) (http.Handler, *store.SQLite) {
 	t.Helper()
-	ctx := context.Background()
-	st, err := store.OpenSQLite(ctx, ":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-	if err := st.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	for _, c := range seed {
-		if err := st.UpsertComponent(ctx, c); err != nil {
-			t.Fatalf("UpsertComponent: %v", err)
-		}
-	}
-	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)), st)
-	if err != nil {
-		t.Fatalf("server.New: %v", err)
-	}
-	return h, st
+	return newHandlerWith(t, "", seed...)
 }
 
 // seedIncident inserts one active incident + first update directly via
@@ -332,39 +330,24 @@ func TestGetAPIIncidentsCacheControlNoStore(t *testing.T) {
 	}
 }
 
-// newPostHandler builds a createIncidentHandler bound to a fresh
-// in-memory store seeded with the given components. Returns the
-// handler and the store so the test can assert side effects.
-func newPostHandler(t *testing.T, seed ...component.Component) (http.HandlerFunc, *store.SQLite) {
+// postIncident is a small helper that POSTs a create-incident body
+// through the wired router, with the bearer token attached. Returns
+// the recorder so callers can assert on status and body.
+func postIncident(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	ctx := context.Background()
-	st, err := store.OpenSQLite(ctx, ":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-	if err := st.Migrate(ctx); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	for _, c := range seed {
-		if err := st.UpsertComponent(ctx, c); err != nil {
-			t.Fatalf("seed: %v", err)
-		}
-	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	svc := incident.NewService(st, logger)
-	return server.CreateIncidentHandlerForTest(svc, logger), st
+	req := httptest.NewRequest(http.MethodPost, "/incidents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
 }
 
 func TestCreateIncidentHandlerCreated(t *testing.T) {
-	h, _ := newPostHandler(t, component.Component{
+	h, _ := newHandlerWith(t, testToken, component.Component{
 		Kind: "Deployment", Namespace: "default", Name: "web",
 	})
-	body := strings.NewReader(`{"component":"Deployment/default/web","title":"Pods down"}`)
-	req := httptest.NewRequest(http.MethodPost, "/incidents", body)
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	rr := postIncident(t, h, `{"component":"Deployment/default/web","title":"Pods down"}`)
 
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", rr.Code, rr.Body.String())
@@ -388,13 +371,10 @@ func TestCreateIncidentHandlerCreated(t *testing.T) {
 }
 
 func TestCreateIncidentHandlerMissingTitle(t *testing.T) {
-	h, _ := newPostHandler(t, component.Component{
+	h, _ := newHandlerWith(t, testToken, component.Component{
 		Kind: "Deployment", Namespace: "default", Name: "web",
 	})
-	req := httptest.NewRequest(http.MethodPost, "/incidents",
-		strings.NewReader(`{"component":"Deployment/default/web","title":""}`))
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	rr := postIncident(t, h, `{"component":"Deployment/default/web","title":""}`)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
@@ -404,11 +384,8 @@ func TestCreateIncidentHandlerMissingTitle(t *testing.T) {
 }
 
 func TestCreateIncidentHandlerMissingComponent(t *testing.T) {
-	h, _ := newPostHandler(t)
-	req := httptest.NewRequest(http.MethodPost, "/incidents",
-		strings.NewReader(`{"title":"oops"}`))
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	h, _ := newHandlerWith(t, testToken)
+	rr := postIncident(t, h, `{"title":"oops"}`)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
@@ -418,11 +395,8 @@ func TestCreateIncidentHandlerMissingComponent(t *testing.T) {
 }
 
 func TestCreateIncidentHandlerUnknownComponent(t *testing.T) {
-	h, _ := newPostHandler(t) // no seeded components
-	req := httptest.NewRequest(http.MethodPost, "/incidents",
-		strings.NewReader(`{"component":"Deployment/default/ghost","title":"x"}`))
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	h, _ := newHandlerWith(t, testToken)
+	rr := postIncident(t, h, `{"component":"Deployment/default/ghost","title":"x"}`)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
@@ -432,43 +406,201 @@ func TestCreateIncidentHandlerUnknownComponent(t *testing.T) {
 }
 
 func TestCreateIncidentHandlerUnknownJSONField(t *testing.T) {
-	h, _ := newPostHandler(t, component.Component{
+	h, _ := newHandlerWith(t, testToken, component.Component{
 		Kind: "Deployment", Namespace: "default", Name: "web",
 	})
-	req := httptest.NewRequest(http.MethodPost, "/incidents",
-		strings.NewReader(`{"component":"Deployment/default/web","title":"x","mystery":1}`))
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	rr := postIncident(t, h, `{"component":"Deployment/default/web","title":"x","mystery":1}`)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
 	if !strings.Contains(rr.Body.String(), "unknown field") {
-		t.Errorf("body = %s, want contains 'unknown field' (decoder error should be surfaced)", rr.Body.String())
+		t.Errorf("body = %s, want contains 'unknown field'", rr.Body.String())
 	}
 }
 
 func TestCreateIncidentHandlerMalformedJSON(t *testing.T) {
-	h, _ := newPostHandler(t)
-	req := httptest.NewRequest(http.MethodPost, "/incidents",
-		strings.NewReader(`{not-json`))
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	h, _ := newHandlerWith(t, testToken)
+	rr := postIncident(t, h, `{not-json`)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
 }
 
-func TestPostIncidentsRouteNotRegistered(t *testing.T) {
-	h, _ := newHandlerWithStore(t)
-	rr := httptest.NewRecorder()
+func TestPostIncidentsRequiresAuth(t *testing.T) {
+	h, _ := newHandlerWith(t, testToken, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
 	req := httptest.NewRequest(http.MethodPost, "/incidents",
-		strings.NewReader(`{"component":"x","title":"y"}`))
+		strings.NewReader(`{"component":"Deployment/default/web","title":"x"}`))
+	// No Authorization header.
+	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-	// chi returns 405 Method Not Allowed when a method is missing
-	// on an otherwise-registered path, or 404 when the path is
-	// unregistered. Either confirms the POST route is not wired.
-	if rr.Code != http.StatusNotFound && rr.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("POST /incidents status = %d, want 404 or 405 "+
-			"(route must be deferred to #21)", rr.Code)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rr.Code)
+	}
+}
+
+func TestPostIncidentsWrongToken(t *testing.T) {
+	h, _ := newHandlerWith(t, testToken, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/incidents",
+		strings.NewReader(`{"component":"Deployment/default/web","title":"x"}`))
+	req.Header.Set("Authorization", "Bearer wrong-token-9999-bad")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rr.Code)
+	}
+}
+
+func TestWritesDisabledWhenNoToken(t *testing.T) {
+	h, _ := newHandlerWith(t, "", component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/incidents",
+		strings.NewReader(`{"component":"Deployment/default/web","title":"x"}`))
+	req.Header.Set("Authorization", "Bearer anything")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "write endpoints disabled") {
+		t.Errorf("body = %s, want contains write endpoints disabled", rr.Body.String())
+	}
+}
+
+func TestGetEndpointsRemainOpenWithoutToken(t *testing.T) {
+	h, _ := newHandlerWith(t, "", component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+	for _, path := range []string{"/api/components", "/api/incidents", "/"} {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+		if rr.Code != http.StatusOK {
+			t.Errorf("GET %s status = %d, want 200", path, rr.Code)
+		}
+	}
+}
+
+// createIncidentVia posts and returns the created incident ID and
+// the decoded body, failing the test on non-201.
+func createIncidentVia(t *testing.T, h http.Handler, component, title string) (string, map[string]any) {
+	t.Helper()
+	rr := postIncident(t, h,
+		`{"component":"`+component+`","title":"`+title+`"}`)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create: status = %d, want 201; body=%s", rr.Code, rr.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode created: %v", err)
+	}
+	id, _ := got["id"].(string)
+	if id == "" {
+		t.Fatalf("created body has no id: %v", got)
+	}
+	return id, got
+}
+
+func resolveIncident(t *testing.T, h http.Handler, id string, withToken bool) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/incidents/"+id+"/resolve", nil)
+	if withToken {
+		req.Header.Set("Authorization", "Bearer "+testToken)
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+func TestPostIncidentsResolveHappyPath(t *testing.T) {
+	h, _ := newHandlerWith(t, testToken, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+	id, _ := createIncidentVia(t, h, "Deployment/default/web", "boom")
+
+	rr := resolveIncident(t, h, id, true)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("resolve status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got["status"] != "resolved" {
+		t.Errorf("status = %v, want resolved", got["status"])
+	}
+	if got["resolvedAt"] == nil {
+		t.Errorf("resolvedAt missing from body")
+	}
+}
+
+func TestPostIncidentsResolveNotFound(t *testing.T) {
+	h, _ := newHandlerWith(t, testToken)
+	rr := resolveIncident(t, h, "01HXNOSUCHINCIDENT00000000", true)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "incident not found") {
+		t.Errorf("body = %s, want incident not found", rr.Body.String())
+	}
+}
+
+func TestPostIncidentsResolveIdempotent(t *testing.T) {
+	h, st := newHandlerWith(t, testToken, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+	id, _ := createIncidentVia(t, h, "Deployment/default/web", "boom")
+
+	first := resolveIncident(t, h, id, true)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first resolve status = %d, want 200", first.Code)
+	}
+	var firstBody map[string]any
+	if err := json.Unmarshal(first.Body.Bytes(), &firstBody); err != nil {
+		t.Fatalf("decode first: %v", err)
+	}
+	firstResolved, _ := firstBody["resolvedAt"].(string)
+	if firstResolved == "" {
+		t.Fatalf("first resolvedAt missing")
+	}
+
+	second := resolveIncident(t, h, id, true)
+	if second.Code != http.StatusOK {
+		t.Fatalf("second resolve status = %d, want 200; body=%s",
+			second.Code, second.Body.String())
+	}
+	var secondBody map[string]any
+	if err := json.Unmarshal(second.Body.Bytes(), &secondBody); err != nil {
+		t.Fatalf("decode second: %v", err)
+	}
+	secondResolved, _ := secondBody["resolvedAt"].(string)
+	if secondResolved != firstResolved {
+		t.Errorf("second resolvedAt = %q, want %q (idempotent)",
+			secondResolved, firstResolved)
+	}
+
+	// Only one resolve-update row landed: 1 initial + 1 resolve = 2.
+	var n int
+	if err := st.DB().QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM incident_updates WHERE incident_id = ?`,
+		id).Scan(&n); err != nil {
+		t.Fatalf("count updates: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("incident_updates count = %d, want 2", n)
+	}
+}
+
+func TestPostIncidentsResolveRequiresAuth(t *testing.T) {
+	h, _ := newHandlerWith(t, testToken, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "web",
+	})
+	id, _ := createIncidentVia(t, h, "Deployment/default/web", "boom")
+	rr := resolveIncident(t, h, id, false)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rr.Code)
 	}
 }

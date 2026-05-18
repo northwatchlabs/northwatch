@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/northwatchlabs/northwatch/internal/component"
 	"github.com/northwatchlabs/northwatch/internal/incident"
@@ -124,4 +125,33 @@ type Store interface {
 	// When includeResolved is false, rows with resolved_at IS NOT
 	// NULL are excluded.
 	ListIncidents(ctx context.Context, includeResolved bool) ([]incident.Incident, error)
+
+	// ResolveIncident marks an incident resolved in a single
+	// BEGIN IMMEDIATE transaction. Idempotent at the boundary:
+	//
+	//   - row missing → ErrNotFound, nothing written.
+	//   - row already resolved → no writes; returns the existing
+	//     incident with its original resolved_at. updateID and
+	//     updateBody are unused on this path.
+	//   - row active → UPDATE incidents (status='resolved',
+	//     resolved_at) and INSERT a new incident_updates row with
+	//     (id=updateID, incident_id=id, body=updateBody,
+	//     status='resolved', created_at=resolvedAt), then return
+	//     the updated incident.
+	//
+	// The store derives incident_id, created_at, and status from
+	// the resolve action itself rather than accepting them as
+	// caller-supplied fields — that eliminates a class of bug
+	// where the timeline row could end up inconsistent with the
+	// incident row it describes.
+	//
+	// The transaction's write lock serializes concurrent resolvers,
+	// so two callers cannot disagree about the post-state.
+	ResolveIncident(
+		ctx context.Context,
+		id string,
+		resolvedAt time.Time,
+		updateID string,
+		updateBody string,
+	) (incident.Incident, error)
 }

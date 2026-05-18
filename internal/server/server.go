@@ -14,6 +14,7 @@ import (
 
 	"github.com/northwatchlabs/northwatch/internal/component"
 	"github.com/northwatchlabs/northwatch/internal/incident"
+	"github.com/northwatchlabs/northwatch/internal/server/auth"
 	"github.com/northwatchlabs/northwatch/internal/store"
 	"github.com/northwatchlabs/northwatch/internal/ui"
 )
@@ -24,9 +25,13 @@ type pageData struct {
 }
 
 // New returns an http.Handler with routes for the status page,
-// healthcheck, and embedded static assets. The store is consulted on
-// every index render.
-func New(logger *slog.Logger, st store.Store) (http.Handler, error) {
+// healthcheck, embedded static assets, and bearer-token-protected
+// write endpoints. The store is consulted on every index render.
+//
+// apiToken gates POST routes. An empty token boots the server with
+// the write side disabled — every POST returns 401. Reads remain
+// public regardless of token state.
+func New(logger *slog.Logger, st store.Store, apiToken string) (http.Handler, error) {
 	tmpl, err := ui.Templates()
 	if err != nil {
 		return nil, err
@@ -52,6 +57,12 @@ func New(logger *slog.Logger, st store.Store) (http.Handler, error) {
 	r.Get("/api/components", apiComponentsHandler(st, logger))
 	r.Get("/api/incidents", apiIncidentsHandler(incSvc, logger))
 	r.Get("/", indexHandler(tmpl, st, logger))
+
+	r.Group(func(r chi.Router) {
+		r.Use(auth.BearerToken(apiToken, logger))
+		r.Post("/incidents", createIncidentHandler(incSvc, logger))
+		r.Post("/incidents/{id}/resolve", resolveIncidentHandler(incSvc, logger))
+	})
 
 	return r, nil
 }

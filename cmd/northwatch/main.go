@@ -66,6 +66,9 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  --kubeconfig       Explicit kubeconfig path (overrides in-cluster credentials)")
 	fmt.Fprintln(os.Stderr, "  --kube-context     Context within the resolved kubeconfig")
 	fmt.Fprintln(os.Stderr, "  --no-cluster       Skip cluster connectivity (local-only run)")
+	fmt.Fprintln(os.Stderr, "  --api-token        Bearer token for write endpoints (>=16 chars).")
+	fmt.Fprintln(os.Stderr, "                     Reads NORTHWATCH_API_TOKEN env when unset.")
+	fmt.Fprintln(os.Stderr, "                     Empty disables writes (POSTs return 401).")
 }
 
 func serveCmd(args []string) int {
@@ -87,6 +90,9 @@ func serveCmd(args []string) int {
 	noCluster := fs.Bool("no-cluster",
 		envOrBool("NORTHWATCH_NO_CLUSTER", false),
 		"Skip cluster connectivity (local-only run)")
+	apiToken := fs.String("api-token",
+		envOr("NORTHWATCH_API_TOKEN", ""),
+		"Bearer token gating POST endpoints (>=16 chars). Empty disables writes.")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -95,6 +101,20 @@ func serveCmd(args []string) int {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	switch {
+	case *apiToken == "":
+		logger.Warn("API write endpoints disabled — set NORTHWATCH_API_TOKEN to enable.")
+	case len(*apiToken) < 16:
+		// Boot must fail rather than silently accept a weak token —
+		// any configured token is a deliberate signal that writes
+		// should be reachable, and shipping with a short token would
+		// invite trivial brute-force attempts.
+		logger.Error("api token too short", "min_length", 16)
+		return 1
+	default:
+		logger.Info("api token configured")
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -121,7 +141,7 @@ func serveCmd(args []string) int {
 		return 1
 	}
 
-	h, err := server.New(logger, st)
+	h, err := server.New(logger, st, *apiToken)
 	if err != nil {
 		logger.Error("server init failed", "err", err)
 		return 1

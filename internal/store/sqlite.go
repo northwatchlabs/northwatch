@@ -512,3 +512,85 @@ func (s *SQLite) ListIncidents(ctx context.Context, includeResolved bool) ([]inc
 	}
 	return out, rows.Err()
 }
+
+const stmtUpdateIncidentResolved = `
+UPDATE incidents SET status = 'resolved', resolved_at = ?
+WHERE id = ?;
+`
+
+// ResolveIncident is the idempotent resolve operation. The
+// transaction holds the write lock across the SELECT-then-UPDATE
+// sequence, so two concurrent callers serialize: the first commits
+// the resolve and inserts an update row; the second observes the
+// already-resolved state and returns it unchanged, without writing
+// a second update row.
+//
+// The inserted incident_updates row's incident_id, created_at, and
+// status are derived from the function's id, resolvedAt, and the
+// resolved status constant respectively — not from a caller-supplied
+// Update — so the timeline row cannot disagree with the incident row.
+func (s *SQLite) ResolveIncident(
+	ctx context.Context,
+	id string,
+	resolvedAt time.Time,
+	updateID string,
+	updateBody string,
+) (incident.Incident, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return incident.Incident{}, fmt.Errorf("store: acquire conn: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return incident.Incident{}, fmt.Errorf("store: begin immediate: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+
+	row := conn.QueryRowContext(ctx, stmtGetIncident, id)
+	inc, err := scanIncident(row.Scan)
+	if err != nil {
+		// ErrNotFound bubbles unchanged; other errors get wrapped.
+		if errors.Is(err, ErrNotFound) {
+			return incident.Incident{}, ErrNotFound
+		}
+		return incident.Incident{}, fmt.Errorf("store: read incident: %w", err)
+	}
+
+	if inc.ResolvedAt != nil {
+		// Already resolved — no-op. Commit the empty transaction to
+		// release the lock promptly; rollback would also be correct.
+		if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+			return incident.Incident{}, fmt.Errorf("store: commit no-op: %w", err)
+		}
+		committed = true
+		return inc, nil
+	}
+
+	resolvedUnix := resolvedAt.UTC().Unix()
+	if _, err := conn.ExecContext(ctx, stmtUpdateIncidentResolved,
+		resolvedUnix, id,
+	); err != nil {
+		return incident.Incident{}, fmt.Errorf("store: update incident resolved: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, stmtInsertIncidentUpdate,
+		updateID, id, updateBody, string(incident.StatusResolved), resolvedUnix,
+	); err != nil {
+		return incident.Incident{}, fmt.Errorf("store: insert resolve update: %w", err)
+	}
+
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return incident.Incident{}, fmt.Errorf("store: commit: %w", err)
+	}
+	committed = true
+
+	inc.Status = incident.StatusResolved
+	resolved := time.Unix(resolvedUnix, 0).UTC()
+	inc.ResolvedAt = &resolved
+	return inc, nil
+}

@@ -17,6 +17,13 @@ type Store interface {
 	CreateIncident(ctx context.Context, inc Incident, firstUpdate Update) error
 	GetActiveIncident(ctx context.Context) (Incident, error)
 	ListIncidents(ctx context.Context, includeResolved bool) ([]Incident, error)
+	ResolveIncident(
+		ctx context.Context,
+		id string,
+		resolvedAt time.Time,
+		updateID string,
+		updateBody string,
+	) (Incident, error)
 }
 
 // Service is the use-case layer for incidents. It validates input,
@@ -91,6 +98,16 @@ func (s *Service) GetActiveIncident(ctx context.Context) (Incident, error) {
 // includeResolved is false, resolved rows are excluded.
 func (s *Service) ListIncidents(ctx context.Context, includeResolved bool) ([]Incident, error) {
 	return s.st.ListIncidents(ctx, includeResolved)
+}
+
+// ResolveIncident marks an incident resolved. Idempotent: resolving
+// an already-resolved incident is a no-op that returns the existing
+// resolved incident with its original ResolvedAt. The transactional
+// store guarantees two concurrent resolvers agree on the post-state.
+//
+// Returns store.ErrNotFound if no incident has the given ID.
+func (s *Service) ResolveIncident(ctx context.Context, id string) (Incident, error) {
+	return s.st.ResolveIncident(ctx, id, s.now(), s.newID(), "Incident resolved.")
 }
 
 // SetClockForTest overrides the time source. Test-only.
