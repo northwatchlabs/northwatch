@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"k8s.io/client-go/dynamic"
+	"k8s.io/utils/clock"
 
 	"github.com/northwatchlabs/northwatch/internal/config"
 	"github.com/northwatchlabs/northwatch/internal/server"
@@ -71,6 +72,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "                     Reads NORTHWATCH_API_TOKEN env when unset.")
 	fmt.Fprintln(os.Stderr, "                     Empty disables writes (POSTs return 401).")
 	fmt.Fprintln(os.Stderr, "  --poll-seconds     HTMX polling interval in seconds (default 5)")
+	fmt.Fprintln(os.Stderr, "  --debounce-seconds Grace period before downward status transitions are persisted")
+	fmt.Fprintln(os.Stderr, "                     (>=0; default 60; 0 disables debounce)")
 }
 
 func serveCmd(args []string) int {
@@ -98,6 +101,9 @@ func serveCmd(args []string) int {
 	pollSeconds := fs.Int("poll-seconds",
 		envOrInt("NORTHWATCH_POLL_SECONDS", 5),
 		"HTMX polling interval in seconds (>=1)")
+	debounceSeconds := fs.Int("debounce-seconds",
+		envOrInt("NORTHWATCH_DEBOUNCE_SECONDS", 60),
+		"Grace period before downward status transitions are persisted (>=0; 0 disables debounce)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -125,6 +131,11 @@ func serveCmd(args []string) int {
 		logger.Error("poll-seconds must be >= 1", "got", *pollSeconds)
 		return 1
 	}
+	if *debounceSeconds < 0 {
+		logger.Error("debounce-seconds must be >= 0", "got", *debounceSeconds)
+		return 1
+	}
+	window := time.Duration(*debounceSeconds) * time.Second
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -176,20 +187,20 @@ func serveCmd(args []string) int {
 		errCh <- srv.ListenAndServe()
 	}()
 	if kc != nil {
-		depWatcher := watcher.NewDeploymentWatcher(kc.Clientset, st, cfg.Components, logger)
+		depWatcher := watcher.NewDeploymentWatcher(kc.Clientset, st, cfg.Components, logger, window, clock.RealClock{})
 		go func() {
 			if err := depWatcher.Start(ctx); err != nil {
 				errCh <- err
 			}
 		}()
-		if hrWatcher := buildHelmReleaseWatcher(ctx, kc, st, cfg.Components, logger); hrWatcher != nil {
+		if hrWatcher := buildHelmReleaseWatcher(ctx, kc, st, cfg.Components, logger, window, clock.RealClock{}); hrWatcher != nil {
 			go func() {
 				if err := hrWatcher.Start(ctx); err != nil {
 					errCh <- err
 				}
 			}()
 		}
-		if appWatcher := buildApplicationWatcher(ctx, kc, st, cfg.Components, logger); appWatcher != nil {
+		if appWatcher := buildApplicationWatcher(ctx, kc, st, cfg.Components, logger, window, clock.RealClock{}); appWatcher != nil {
 			go func() {
 				if err := appWatcher.Start(ctx); err != nil {
 					errCh <- err
@@ -377,6 +388,8 @@ func buildHelmReleaseWatcher(
 	st store.Store,
 	specs []config.Spec,
 	logger *slog.Logger,
+	window time.Duration,
+	clk clock.WithDelayedExecution,
 ) *watcher.HelmReleaseWatcher {
 	present, err := watcher.HelmReleaseCRDPresent(ctx, kc.Config)
 	if err != nil {
@@ -392,7 +405,7 @@ func buildHelmReleaseWatcher(
 		logger.Warn("dynamic client init failed; skipping helmrelease watcher", "err", err)
 		return nil
 	}
-	return watcher.NewHelmReleaseWatcher(dyn, st, specs, logger)
+	return watcher.NewHelmReleaseWatcher(dyn, st, specs, logger, window, clk)
 }
 
 // buildApplicationWatcher probes for the ArgoCD Application CRD and
@@ -407,6 +420,8 @@ func buildApplicationWatcher(
 	st store.Store,
 	specs []config.Spec,
 	logger *slog.Logger,
+	window time.Duration,
+	clk clock.WithDelayedExecution,
 ) *watcher.ApplicationWatcher {
 	present, err := watcher.ApplicationCRDPresent(ctx, kc.Config)
 	if err != nil {
@@ -422,7 +437,7 @@ func buildApplicationWatcher(
 		logger.Warn("dynamic client init failed; skipping application watcher", "err", err)
 		return nil
 	}
-	return watcher.NewApplicationWatcher(dyn, st, specs, logger)
+	return watcher.NewApplicationWatcher(dyn, st, specs, logger, window, clk)
 }
 
 func normalizeAddr(addr string) string {

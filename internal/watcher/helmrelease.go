@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -16,9 +18,11 @@ import (
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/utils/clock"
 
 	"github.com/northwatchlabs/northwatch/internal/component"
 	"github.com/northwatchlabs/northwatch/internal/config"
+	"github.com/northwatchlabs/northwatch/internal/status"
 	"github.com/northwatchlabs/northwatch/internal/store"
 )
 
@@ -94,16 +98,10 @@ func helmReleaseCRDPresentVia(ctx context.Context, disc discovery.ServerGroupsIn
 }
 
 // HelmReleaseWatcher watches HelmRelease events for the configured
-// component set and reconciles status from the Ready condition. Only
-// HelmReleases whose (namespace, name) appears in the configured set
-// produce store writes; all others are ignored.
-//
-// Status mapping reads status.conditions[type=Ready]; #19 will harden
-// this with debounce and multi-condition merging:
-//   - Ready=True                       → operational
-//   - Ready=False, reason=Progressing  → degraded
-//   - Ready=False, other reason        → down
-//   - Ready missing/Unknown            → unknown
+// component set, maps them via status.MapHelmRelease, and routes the
+// (prev, next) transition through its own Debouncer before writing
+// to the store. Status mapping rules and the debounce protocol live
+// in internal/status/.
 //
 // In-cluster RBAC: needs get, list, watch on
 // helm.toolkit.fluxcd.io/v2/helmreleases. The Helm chart (#24) will
@@ -113,9 +111,13 @@ type HelmReleaseWatcher struct {
 	store   store.Store
 	watched map[types.NamespacedName]config.Spec
 	logger  *slog.Logger
+	window  time.Duration
+	clk     clock.WithDelayedExecution
 
-	mu       sync.Mutex
-	lastSeen map[types.NamespacedName]component.Status
+	// populated in Start once the informer factory exists
+	lister    cache.GenericLister
+	debouncer *status.Debouncer
+	ctx       context.Context
 
 	syncedCh   chan struct{}
 	syncedOnce sync.Once
@@ -124,14 +126,22 @@ type HelmReleaseWatcher struct {
 // NewHelmReleaseWatcher mirrors NewDeploymentWatcher: it filters
 // specs to Kind == "HelmRelease" and builds the lookup map. An empty
 // specs slice is valid — the watcher runs but writes nothing.
+// window=0 disables debouncing (Apply writes immediately). clk=nil
+// defaults to clock.RealClock{}. A nil logger falls back to
+// slog.Default().
 func NewHelmReleaseWatcher(
 	client dynamic.Interface,
 	st store.Store,
 	specs []config.Spec,
 	logger *slog.Logger,
+	window time.Duration,
+	clk clock.WithDelayedExecution,
 ) *HelmReleaseWatcher {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if clk == nil {
+		clk = clock.RealClock{}
 	}
 	watched := make(map[types.NamespacedName]config.Spec)
 	for _, s := range specs {
@@ -146,7 +156,8 @@ func NewHelmReleaseWatcher(
 		store:    st,
 		watched:  watched,
 		logger:   logger.With("watcher", "helmrelease"),
-		lastSeen: make(map[types.NamespacedName]component.Status),
+		window:   window,
+		clk:      clk,
 		syncedCh: make(chan struct{}),
 	}
 }
@@ -160,8 +171,12 @@ func (w *HelmReleaseWatcher) Synced() <-chan struct{} {
 // Start runs the dynamic informer until ctx is cancelled. Blocks; the
 // caller is expected to launch it in its own goroutine.
 func (w *HelmReleaseWatcher) Start(ctx context.Context) error {
+	w.ctx = ctx
 	factory := dynamicinformer.NewDynamicSharedInformerFactory(w.client, 0)
 	informer := factory.ForResource(HelmReleaseGVR).Informer()
+	w.lister = factory.ForResource(HelmReleaseGVR).Lister()
+	w.debouncer = status.NewDebouncer(w.window, w.clk, w.retry)
+	defer w.debouncer.Stop()
 
 	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
@@ -179,8 +194,9 @@ func (w *HelmReleaseWatcher) Start(ctx context.Context) error {
 			w.handle(ctx, u)
 		},
 		DeleteFunc: func(_ interface{}) {
-			// Same semantics as DeploymentWatcher: the last status
-			// sticks; we don't clear lastSeen or write a recovery.
+			// Last status sticks. Stale pending state for a deleted
+			// object is cleared by the retry callback's lister-miss
+			// branch when the timer fires.
 		},
 	}); err != nil {
 		return fmt.Errorf("watcher: add event handler: %w", err)
@@ -207,75 +223,76 @@ func (w *HelmReleaseWatcher) handle(ctx context.Context, u *unstructured.Unstruc
 		return
 	}
 
-	status := computeHelmReleaseStatus(u)
+	next := status.MapHelmRelease(u)
+	id := (component.Component{
+		Kind: "HelmRelease", Namespace: spec.Namespace, Name: spec.Name,
+	}).ID()
 
-	w.mu.Lock()
-	prev, seen := w.lastSeen[key]
-	if seen && prev == status {
-		w.mu.Unlock()
+	prev, err := w.fetchPrev(ctx, id)
+	if err != nil {
+		w.logger.Error("get prev failed", "err", err, "id", id)
 		return
 	}
-	w.lastSeen[key] = status
-	w.mu.Unlock()
 
-	c := component.Component{
-		Kind:        "HelmRelease",
-		Namespace:   spec.Namespace,
-		Name:        spec.Name,
-		DisplayName: displayNameOrName(spec),
-		Status:      status,
-	}
-	if err := w.store.UpsertComponent(ctx, c); err != nil {
-		w.logger.Error("upsert failed",
-			"err", err,
-			"id", c.ID(),
-			"status", string(status),
-		)
-		w.mu.Lock()
-		if seen {
-			w.lastSeen[key] = prev
-		} else {
-			delete(w.lastSeen, key)
+	write, finalStatus, retryAfter := w.debouncer.Apply(id, prev, next, w.clk.Now())
+	if write {
+		c := component.Component{
+			Kind:        "HelmRelease",
+			Namespace:   spec.Namespace,
+			Name:        spec.Name,
+			DisplayName: displayNameOrName(spec),
+			Status:      finalStatus,
 		}
-		w.mu.Unlock()
+		if err := w.store.UpsertComponent(ctx, c); err != nil {
+			w.logger.Error("upsert failed",
+				"err", err,
+				"id", id,
+				"status", string(finalStatus),
+			)
+			return
+		}
+		w.logger.Info("reconciled", "id", id, "status", string(finalStatus))
 		return
 	}
-	w.logger.Info("reconciled",
-		"id", c.ID(),
-		"status", string(status),
-	)
+	if retryAfter > 0 {
+		w.logger.Debug("debounced",
+			"id", id,
+			"prev", string(prev),
+			"next", string(next),
+			"retry_after", retryAfter,
+		)
+	}
 }
 
-// computeHelmReleaseStatus maps status.conditions[type=Ready] to a
-// component.Status. Returns unknown when the Ready condition is
-// missing or its status field is not True/False — typical for a
-// HelmRelease that Flux has not yet observed.
-func computeHelmReleaseStatus(u *unstructured.Unstructured) component.Status {
-	conds, found, err := unstructured.NestedSlice(u.Object, "status", "conditions")
-	if err != nil || !found {
-		return component.StatusUnknown
+func (w *HelmReleaseWatcher) fetchPrev(ctx context.Context, id string) (component.Status, error) {
+	got, err := w.store.GetComponent(ctx, id)
+	if errors.Is(err, store.ErrNotFound) {
+		return component.StatusUnknown, nil
 	}
-	for _, c := range conds {
-		m, ok := c.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if t, _ := m["type"].(string); t != "Ready" {
-			continue
-		}
-		s, _ := m["status"].(string)
-		switch s {
-		case "True":
-			return component.StatusOperational
-		case "False":
-			reason, _ := m["reason"].(string)
-			if reason == "Progressing" {
-				return component.StatusDegraded
-			}
-			return component.StatusDown
-		default:
-			return component.StatusUnknown
-		}
+	if err != nil {
+		return "", err
 	}
-	return component.StatusUnknown
+	return got.Status, nil
+}
+
+// retry is the Debouncer's per-key callback. id format is
+// "HelmRelease/<namespace>/<name>" — the canonical Component ID.
+func (w *HelmReleaseWatcher) retry(id string) {
+	parts := strings.SplitN(id, "/", 3)
+	if len(parts) != 3 || parts[0] != "HelmRelease" {
+		return
+	}
+	obj, err := w.lister.ByNamespace(parts[1]).Get(parts[2])
+	if err != nil || obj == nil {
+		// Object gone from the lister cache. Clear pending entry so
+		// a same-ID recreate is treated as a fresh observation.
+		w.debouncer.Forget(id)
+		return
+	}
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		w.debouncer.Forget(id)
+		return
+	}
+	w.handle(w.ctx, u)
 }

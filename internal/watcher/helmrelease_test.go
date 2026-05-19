@@ -51,7 +51,7 @@ func newHelmRelease(ns, name, readyStatus, readyReason string) *unstructured.Uns
 
 func startHelmReleaseWatcher(t *testing.T, cs dynamic.Interface, rs store.Store, specs []config.Spec) func() {
 	t.Helper()
-	w := NewHelmReleaseWatcher(cs, rs, specs, quietLogger())
+	w := NewHelmReleaseWatcher(cs, rs, specs, quietLogger(), 0, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- w.Start(ctx) }()
@@ -387,71 +387,5 @@ func TestHelmReleaseCRDPresentVia_CtxCancelled(t *testing.T) {
 	}
 	if ok {
 		t.Errorf("ok = true, want false on cancel")
-	}
-}
-
-func TestComputeHelmReleaseStatus(t *testing.T) {
-	cases := []struct {
-		name   string
-		mutate func(u *unstructured.Unstructured)
-		want   component.Status
-	}{
-		{
-			name:   "Ready=True → operational",
-			mutate: func(u *unstructured.Unstructured) {},
-			want:   component.StatusOperational,
-		},
-		{
-			name: "Ready=False, reason=Progressing → degraded",
-			mutate: func(u *unstructured.Unstructured) {
-				_ = unstructured.SetNestedSlice(u.Object, []interface{}{
-					map[string]interface{}{"type": "Ready", "status": "False", "reason": "Progressing"},
-				}, "status", "conditions")
-			},
-			want: component.StatusDegraded,
-		},
-		{
-			name: "Ready=False, reason=InstallFailed → down",
-			mutate: func(u *unstructured.Unstructured) {
-				_ = unstructured.SetNestedSlice(u.Object, []interface{}{
-					map[string]interface{}{"type": "Ready", "status": "False", "reason": "InstallFailed"},
-				}, "status", "conditions")
-			},
-			want: component.StatusDown,
-		},
-		{
-			name: "Ready=Unknown → unknown",
-			mutate: func(u *unstructured.Unstructured) {
-				_ = unstructured.SetNestedSlice(u.Object, []interface{}{
-					map[string]interface{}{"type": "Ready", "status": "Unknown", "reason": "InProgress"},
-				}, "status", "conditions")
-			},
-			want: component.StatusUnknown,
-		},
-		{
-			name: "no conditions → unknown",
-			mutate: func(u *unstructured.Unstructured) {
-				unstructured.RemoveNestedField(u.Object, "status", "conditions")
-			},
-			want: component.StatusUnknown,
-		},
-		{
-			name: "only non-Ready conditions → unknown",
-			mutate: func(u *unstructured.Unstructured) {
-				_ = unstructured.SetNestedSlice(u.Object, []interface{}{
-					map[string]interface{}{"type": "Released", "status": "True"},
-				}, "status", "conditions")
-			},
-			want: component.StatusUnknown,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			u := newHelmRelease("flux-system", "my-app", "True", "ok")
-			tc.mutate(u)
-			if got := computeHelmReleaseStatus(u); got != tc.want {
-				t.Errorf("got %q, want %q", got, tc.want)
-			}
-		})
 	}
 }
