@@ -167,10 +167,10 @@ func serveCmd(args []string) int {
 	// goroutine. Clean shutdowns (Start returning nil after
 	// ctx.Done) are NOT forwarded: an erroneous nil send could race
 	// the <-ctx.Done() arm below and let serveCmd return without
-	// calling srv.Shutdown. Sized for both watchers plus the HTTP
+	// calling srv.Shutdown. Sized for all watchers plus the HTTP
 	// server so a real failure can't block its sender during the
 	// shutdown window.
-	errCh := make(chan error, 3)
+	errCh := make(chan error, 4)
 	go func() {
 		logger.Info("listening", "addr", srv.Addr, "db", *dbPath)
 		errCh <- srv.ListenAndServe()
@@ -185,6 +185,13 @@ func serveCmd(args []string) int {
 		if hrWatcher := buildHelmReleaseWatcher(ctx, kc, st, cfg.Components, logger); hrWatcher != nil {
 			go func() {
 				if err := hrWatcher.Start(ctx); err != nil {
+					errCh <- err
+				}
+			}()
+		}
+		if appWatcher := buildApplicationWatcher(ctx, kc, st, cfg.Components, logger); appWatcher != nil {
+			go func() {
+				if err := appWatcher.Start(ctx); err != nil {
 					errCh <- err
 				}
 			}()
@@ -386,6 +393,36 @@ func buildHelmReleaseWatcher(
 		return nil
 	}
 	return watcher.NewHelmReleaseWatcher(dyn, st, specs, logger)
+}
+
+// buildApplicationWatcher probes for the ArgoCD Application CRD and
+// constructs the watcher only when it's present. Returns nil when
+// the CRD is missing — the cluster just doesn't run ArgoCD, which is
+// expected on non-GitOps clusters or Flux-only setups. A probe error
+// is logged but otherwise treated as "absent" so a transient
+// discovery failure doesn't take serve down.
+func buildApplicationWatcher(
+	ctx context.Context,
+	kc *watcher.Client,
+	st store.Store,
+	specs []config.Spec,
+	logger *slog.Logger,
+) *watcher.ApplicationWatcher {
+	present, err := watcher.ApplicationCRDPresent(ctx, kc.Config)
+	if err != nil {
+		logger.Warn("application CRD probe failed; skipping watcher", "err", err)
+		return nil
+	}
+	if !present {
+		logger.Info("ArgoCD CRDs not present, skipping application watcher")
+		return nil
+	}
+	dyn, err := dynamic.NewForConfig(kc.Config)
+	if err != nil {
+		logger.Warn("dynamic client init failed; skipping application watcher", "err", err)
+		return nil
+	}
+	return watcher.NewApplicationWatcher(dyn, st, specs, logger)
 }
 
 func normalizeAddr(addr string) string {
