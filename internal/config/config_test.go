@@ -24,6 +24,10 @@ components:
     namespace: argocd
     name: payments
     displayName: "Payments Service"
+  - kind: Kustomization
+    namespace: flux-system
+    name: infra
+    displayName: "Infra Kustomization"
 `
 
 // writeTempConfig writes body to a fresh tempfile and returns its
@@ -44,8 +48,8 @@ func TestLoad_Valid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(f.Components) != 3 {
-		t.Fatalf("len(Components) = %d, want 3", len(f.Components))
+	if len(f.Components) != 4 {
+		t.Fatalf("len(Components) = %d, want 4", len(f.Components))
 	}
 	if got, want := f.Components[0].Kind, "Deployment"; got != want {
 		t.Errorf("[0].Kind = %q, want %q", got, want)
@@ -55,6 +59,9 @@ func TestLoad_Valid(t *testing.T) {
 	}
 	if got, want := f.Components[2].Name, "payments"; got != want {
 		t.Errorf("[2].Name = %q, want %q", got, want)
+	}
+	if got, want := f.Components[3].Kind, "Kustomization"; got != want {
+		t.Errorf("[3].Kind = %q, want %q", got, want)
 	}
 }
 

@@ -61,6 +61,91 @@ func TestMapHelmRelease(t *testing.T) {
 	}
 }
 
+func TestMapKustomization(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		ks   *unstructured.Unstructured
+		want component.Status
+	}{
+		{
+			name: "Ready=True maps to operational",
+			ks:   kustomizationWithReady("True", "ReconciliationSucceeded"),
+			want: component.StatusOperational,
+		},
+		{
+			name: "Ready=False, reason=Progressing maps to degraded",
+			ks:   kustomizationWithReady("False", "Progressing"),
+			want: component.StatusDegraded,
+		},
+		{
+			name: "Ready=False, reason=BuildFailed maps to down",
+			ks:   kustomizationWithReady("False", "BuildFailed"),
+			want: component.StatusDown,
+		},
+		{
+			name: "Ready=False, reason=HealthCheckFailed maps to down",
+			ks:   kustomizationWithReady("False", "HealthCheckFailed"),
+			want: component.StatusDown,
+		},
+		{
+			name: "Ready missing maps to unknown",
+			ks:   newKustomization(map[string]interface{}{"status": map[string]interface{}{}}),
+			want: component.StatusUnknown,
+		},
+		{
+			name: "Ready=Unknown maps to unknown",
+			ks:   kustomizationWithReady("Unknown", ""),
+			want: component.StatusUnknown,
+		},
+		{
+			name: "no status.conditions at all maps to unknown",
+			ks:   newKustomization(nil),
+			want: component.StatusUnknown,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := MapKustomization(tc.ks)
+			if got != tc.want {
+				t.Fatalf("MapKustomization = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func kustomizationWithReady(readyStatus, reason string) *unstructured.Unstructured {
+	cond := map[string]interface{}{
+		"type":   "Ready",
+		"status": readyStatus,
+	}
+	if reason != "" {
+		cond["reason"] = reason
+	}
+	return newKustomization(map[string]interface{}{
+		"status": map[string]interface{}{
+			"conditions": []interface{}{cond},
+		},
+	})
+}
+
+func newKustomization(obj map[string]interface{}) *unstructured.Unstructured {
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "kustomize.toolkit.fluxcd.io",
+		Version: "v1",
+		Kind:    "Kustomization",
+	})
+	u.SetNamespace("default")
+	u.SetName("test")
+	for k, v := range obj {
+		u.Object[k] = v
+	}
+	return u
+}
+
 func helmReleaseWithReady(readyStatus, reason string) *unstructured.Unstructured {
 	cond := map[string]interface{}{
 		"type":   "Ready",

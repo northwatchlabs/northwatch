@@ -70,9 +70,10 @@ func (e *ValidationError) Error() string {
 }
 
 var allowedKinds = map[string]struct{}{
-	"Deployment":  {},
-	"HelmRelease": {},
-	"Application": {},
+	"Deployment":    {},
+	"HelmRelease":   {},
+	"Application":   {},
+	"Kustomization": {},
 }
 
 // Validate runs every rule against f and returns *ValidationError
@@ -92,7 +93,7 @@ func (f *File) Validate() error {
 			errs = append(errs, fmt.Errorf("components[%d]: kind is required", i))
 		} else if _, ok := allowedKinds[c.Kind]; !ok {
 			errs = append(errs, fmt.Errorf(
-				"components[%d]: kind %q is not one of Deployment, HelmRelease, Application",
+				"components[%d]: kind %q is not one of Deployment, HelmRelease, Application, Kustomization",
 				i, c.Kind,
 			))
 		}

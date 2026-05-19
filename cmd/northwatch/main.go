@@ -181,7 +181,7 @@ func serveCmd(args []string) int {
 	// calling srv.Shutdown. Sized for all watchers plus the HTTP
 	// server so a real failure can't block its sender during the
 	// shutdown window.
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 5)
 	go func() {
 		logger.Info("listening", "addr", srv.Addr, "db", *dbPath)
 		errCh <- srv.ListenAndServe()
@@ -203,6 +203,13 @@ func serveCmd(args []string) int {
 		if appWatcher := buildApplicationWatcher(ctx, kc, st, cfg.Components, logger, window, clock.RealClock{}); appWatcher != nil {
 			go func() {
 				if err := appWatcher.Start(ctx); err != nil {
+					errCh <- err
+				}
+			}()
+		}
+		if ksWatcher := buildKustomizationWatcher(ctx, kc, st, cfg.Components, logger, window, clock.RealClock{}); ksWatcher != nil {
+			go func() {
+				if err := ksWatcher.Start(ctx); err != nil {
 					errCh <- err
 				}
 			}()
@@ -439,6 +446,39 @@ func buildApplicationWatcher(
 		return nil
 	}
 	return watcher.NewApplicationWatcher(dyn, st, specs, logger, window, clk)
+}
+
+// buildKustomizationWatcher probes for the Flux Kustomization CRD
+// and constructs the watcher only when it's present. Returns nil
+// when the CRD is missing — the cluster just doesn't run Flux's
+// kustomize-controller, which is expected on non-GitOps clusters or
+// HelmRelease-only Flux setups. A probe error is logged but
+// otherwise treated as "absent" so a transient discovery failure
+// doesn't take serve down.
+func buildKustomizationWatcher(
+	ctx context.Context,
+	kc *watcher.Client,
+	st store.Store,
+	specs []config.Spec,
+	logger *slog.Logger,
+	window time.Duration,
+	clk clock.WithDelayedExecution,
+) *watcher.KustomizationWatcher {
+	present, err := watcher.KustomizationCRDPresent(ctx, kc.Config)
+	if err != nil {
+		logger.Warn("kustomization CRD probe failed; skipping watcher", "err", err)
+		return nil
+	}
+	if !present {
+		logger.Info("Flux Kustomize CRDs not present, skipping kustomization watcher")
+		return nil
+	}
+	dyn, err := dynamic.NewForConfig(kc.Config)
+	if err != nil {
+		logger.Warn("dynamic client init failed; skipping kustomization watcher", "err", err)
+		return nil
+	}
+	return watcher.NewKustomizationWatcher(dyn, st, specs, logger, window, clk, watcher.KustomizationGVR)
 }
 
 func normalizeAddr(addr string) string {
