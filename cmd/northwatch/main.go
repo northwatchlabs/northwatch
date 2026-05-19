@@ -391,13 +391,13 @@ func buildHelmReleaseWatcher(
 	window time.Duration,
 	clk clock.WithDelayedExecution,
 ) *watcher.HelmReleaseWatcher {
-	present, err := watcher.HelmReleaseCRDPresent(ctx, kc.Config)
+	gvr, ok, err := watcher.ResolveHelmReleaseGVR(ctx, kc.Config)
 	if err != nil {
 		logger.Warn("helmrelease CRD probe failed; skipping watcher", "err", err)
 		return nil
 	}
-	if !present {
-		logger.Info("Flux CRDs not present, skipping helmrelease watcher")
+	if !ok {
+		logger.Info("Flux HelmRelease CRDs not present, skipping helmrelease watcher")
 		return nil
 	}
 	dyn, err := dynamic.NewForConfig(kc.Config)
@@ -405,7 +405,8 @@ func buildHelmReleaseWatcher(
 		logger.Warn("dynamic client init failed; skipping helmrelease watcher", "err", err)
 		return nil
 	}
-	return watcher.NewHelmReleaseWatcher(dyn, st, specs, logger, window, clk)
+	logger.Info("helmrelease watcher resolved API version", "version", gvr.Version)
+	return watcher.NewHelmReleaseWatcher(dyn, st, specs, logger, window, clk, gvr)
 }
 
 // buildApplicationWatcher probes for the ArgoCD Application CRD and

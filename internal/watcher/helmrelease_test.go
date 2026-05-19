@@ -18,6 +18,15 @@ import (
 	"github.com/northwatchlabs/northwatch/internal/store"
 )
 
+// helmReleaseV2GVR is the v2 GVR used across the watcher tests. The
+// probe-resolution tests in this file exercise fallback to v2beta2 /
+// v2beta1, but the dynamic-informer tests only need a single GVR.
+var helmReleaseV2GVR = schema.GroupVersionResource{
+	Group:    helmReleaseGroup,
+	Version:  "v2",
+	Resource: helmReleaseResource,
+}
+
 // newDynamicClient returns a fake dynamic client wired with the GVR
 // → list-kind mapping that dynamicinformer needs to construct
 // informers. Without the list-kind mapping the informer panics on
@@ -26,14 +35,14 @@ import (
 func newDynamicClient() *dynfake.FakeDynamicClient {
 	scheme := runtime.NewScheme()
 	listKinds := map[schema.GroupVersionResource]string{
-		HelmReleaseGVR: "HelmReleaseList",
+		helmReleaseV2GVR: "HelmReleaseList",
 	}
 	return dynfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds)
 }
 
 func newHelmRelease(ns, name, readyStatus, readyReason string) *unstructured.Unstructured {
 	u := &unstructured.Unstructured{}
-	u.SetGroupVersionKind(HelmReleaseGVR.GroupVersion().WithKind("HelmRelease"))
+	u.SetGroupVersionKind(helmReleaseV2GVR.GroupVersion().WithKind("HelmRelease"))
 	u.SetNamespace(ns)
 	u.SetName(name)
 	if readyStatus != "" {
@@ -51,7 +60,7 @@ func newHelmRelease(ns, name, readyStatus, readyReason string) *unstructured.Uns
 
 func startHelmReleaseWatcher(t *testing.T, cs dynamic.Interface, rs store.Store, specs []config.Spec) func() {
 	t.Helper()
-	w := NewHelmReleaseWatcher(cs, rs, specs, quietLogger(), 0, nil)
+	w := NewHelmReleaseWatcher(cs, rs, specs, quietLogger(), 0, nil, helmReleaseV2GVR)
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- w.Start(ctx) }()
@@ -91,7 +100,7 @@ func TestHelmReleaseWatcher_ReadyTransitions(t *testing.T) {
 	defer stop()
 
 	ctx := context.Background()
-	res := cs.Resource(HelmReleaseGVR).Namespace("flux-system")
+	res := cs.Resource(helmReleaseV2GVR).Namespace("flux-system")
 
 	// operational: Ready=True
 	if _, err := res.Create(ctx, newHelmRelease("flux-system", "my-app", "True", "ReconciliationSucceeded"), metav1.CreateOptions{}); err != nil {
@@ -155,7 +164,7 @@ func TestHelmReleaseWatcher_UnwatchedIgnored(t *testing.T) {
 	defer stop()
 
 	ctx := context.Background()
-	res := cs.Resource(HelmReleaseGVR)
+	res := cs.Resource(helmReleaseV2GVR)
 
 	if _, err := res.Namespace("flux-system").Create(ctx, newHelmRelease("flux-system", "other", "True", "ok"), metav1.CreateOptions{}); err != nil {
 		t.Fatalf("create other: %v", err)
@@ -185,7 +194,7 @@ func TestHelmReleaseWatcher_StatusUnchangedNoOp(t *testing.T) {
 	defer stop()
 
 	ctx := context.Background()
-	res := cs.Resource(HelmReleaseGVR).Namespace("flux-system")
+	res := cs.Resource(helmReleaseV2GVR).Namespace("flux-system")
 	if _, err := res.Create(ctx, newHelmRelease("flux-system", "my-app", "True", "ok"), metav1.CreateOptions{}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -223,7 +232,7 @@ func TestHelmReleaseWatcher_DeleteLeavesStatus(t *testing.T) {
 	defer stop()
 
 	ctx := context.Background()
-	res := cs.Resource(HelmReleaseGVR).Namespace("flux-system")
+	res := cs.Resource(helmReleaseV2GVR).Namespace("flux-system")
 	if _, err := res.Create(ctx, newHelmRelease("flux-system", "my-app", "False", "InstallFailed"), metav1.CreateOptions{}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -253,7 +262,7 @@ func TestHelmReleaseWatcher_CrossKindIsolation(t *testing.T) {
 	defer stop()
 
 	ctx := context.Background()
-	res := cs.Resource(HelmReleaseGVR).Namespace("flux-system")
+	res := cs.Resource(helmReleaseV2GVR).Namespace("flux-system")
 	if _, err := res.Create(ctx, newHelmRelease("flux-system", "my-app", "True", "ok"), metav1.CreateOptions{}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -270,7 +279,7 @@ func TestHelmReleaseWatcher_DisplayNamePropagation(t *testing.T) {
 	defer stop()
 
 	ctx := context.Background()
-	res := cs.Resource(HelmReleaseGVR).Namespace("flux-system")
+	res := cs.Resource(helmReleaseV2GVR).Namespace("flux-system")
 	if _, err := res.Create(ctx, newHelmRelease("flux-system", "my-app", "True", "ok"), metav1.CreateOptions{}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -286,7 +295,7 @@ func TestHelmReleaseWatcher_DisplayNamePropagation(t *testing.T) {
 
 // stubDiscovery is a minimal ServerGroupsInterface impl used by the
 // CRD-probe tests. Returning an error or blocking lets us exercise
-// the error and ctx.Done() arms of helmReleaseCRDPresentVia without
+// the error and ctx.Done() arms of resolveHelmReleaseGVRVia without
 // reaching for client-go's discovery fakes (which assume a real
 // REST round-trip).
 type stubDiscovery struct {
@@ -302,27 +311,68 @@ func (s *stubDiscovery) ServerGroups() (*metav1.APIGroupList, error) {
 	return s.groups, s.err
 }
 
-func TestHelmReleaseCRDPresentVia_Present(t *testing.T) {
-	disc := &stubDiscovery{groups: &metav1.APIGroupList{Groups: []metav1.APIGroup{
+// helmReleaseGroups builds an APIGroupList where the Flux HelmRelease
+// group serves exactly the given versions. The order is preserved so
+// tests can assert the resolver's preference order rather than the
+// server's discovery order.
+func helmReleaseGroups(versions ...string) *metav1.APIGroupList {
+	gvs := make([]metav1.GroupVersionForDiscovery, 0, len(versions))
+	for _, v := range versions {
+		gvs = append(gvs, metav1.GroupVersionForDiscovery{Version: v})
+	}
+	return &metav1.APIGroupList{Groups: []metav1.APIGroup{
 		{Name: "apps", Versions: []metav1.GroupVersionForDiscovery{{Version: "v1"}}},
-		{Name: HelmReleaseGVR.Group, Versions: []metav1.GroupVersionForDiscovery{
-			{Version: "v2beta1"}, {Version: HelmReleaseGVR.Version},
-		}},
-	}}}
-	ok, err := helmReleaseCRDPresentVia(context.Background(), disc)
+		{Name: helmReleaseGroup, Versions: gvs},
+	}}
+}
+
+func TestResolveHelmReleaseGVRVia_PrefersV2(t *testing.T) {
+	disc := &stubDiscovery{groups: helmReleaseGroups("v2beta1", "v2beta2", "v2")}
+	gvr, ok, err := resolveHelmReleaseGVRVia(context.Background(), disc)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
 	if !ok {
-		t.Errorf("ok = false, want true (Flux v2 group present)")
+		t.Fatalf("ok = false, want true (all versions present)")
+	}
+	if gvr.Version != "v2" {
+		t.Errorf("gvr.Version = %q, want %q", gvr.Version, "v2")
 	}
 }
 
-func TestHelmReleaseCRDPresentVia_AbsentGroup(t *testing.T) {
+func TestResolveHelmReleaseGVRVia_FallsBackToV2Beta2(t *testing.T) {
+	disc := &stubDiscovery{groups: helmReleaseGroups("v2beta1", "v2beta2")}
+	gvr, ok, err := resolveHelmReleaseGVRVia(context.Background(), disc)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if !ok {
+		t.Fatalf("ok = false, want true (v2beta2 served)")
+	}
+	if gvr.Version != "v2beta2" {
+		t.Errorf("gvr.Version = %q, want %q", gvr.Version, "v2beta2")
+	}
+}
+
+func TestResolveHelmReleaseGVRVia_FallsBackToV2Beta1(t *testing.T) {
+	disc := &stubDiscovery{groups: helmReleaseGroups("v2beta1")}
+	gvr, ok, err := resolveHelmReleaseGVRVia(context.Background(), disc)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if !ok {
+		t.Fatalf("ok = false, want true (v2beta1 served)")
+	}
+	if gvr.Version != "v2beta1" {
+		t.Errorf("gvr.Version = %q, want %q", gvr.Version, "v2beta1")
+	}
+}
+
+func TestResolveHelmReleaseGVRVia_AbsentGroup(t *testing.T) {
 	disc := &stubDiscovery{groups: &metav1.APIGroupList{Groups: []metav1.APIGroup{
 		{Name: "apps", Versions: []metav1.GroupVersionForDiscovery{{Version: "v1"}}},
 	}}}
-	ok, err := helmReleaseCRDPresentVia(context.Background(), disc)
+	_, ok, err := resolveHelmReleaseGVRVia(context.Background(), disc)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
@@ -331,25 +381,24 @@ func TestHelmReleaseCRDPresentVia_AbsentGroup(t *testing.T) {
 	}
 }
 
-func TestHelmReleaseCRDPresentVia_GroupPresentWrongVersion(t *testing.T) {
-	disc := &stubDiscovery{groups: &metav1.APIGroupList{Groups: []metav1.APIGroup{
-		{Name: HelmReleaseGVR.Group, Versions: []metav1.GroupVersionForDiscovery{
-			{Version: "v2beta1"}, {Version: "v2beta2"},
-		}},
-	}}}
-	ok, err := helmReleaseCRDPresentVia(context.Background(), disc)
+func TestResolveHelmReleaseGVRVia_NoKnownVersionServed(t *testing.T) {
+	// Group present, but only some unrelated future version. The
+	// resolver must return not-found rather than picking the unknown
+	// version blindly.
+	disc := &stubDiscovery{groups: helmReleaseGroups("v3alpha1")}
+	_, ok, err := resolveHelmReleaseGVRVia(context.Background(), disc)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
 	}
 	if ok {
-		t.Errorf("ok = true, want false (only legacy versions present, no v2)")
+		t.Errorf("ok = true, want false (no candidate version served)")
 	}
 }
 
-func TestHelmReleaseCRDPresentVia_DiscoveryError(t *testing.T) {
+func TestResolveHelmReleaseGVRVia_DiscoveryError(t *testing.T) {
 	wantErr := errors.New("apiserver unreachable")
 	disc := &stubDiscovery{err: wantErr}
-	ok, err := helmReleaseCRDPresentVia(context.Background(), disc)
+	_, ok, err := resolveHelmReleaseGVRVia(context.Background(), disc)
 	if err == nil || !errors.Is(err, wantErr) {
 		t.Errorf("err = %v, want wrap of %v", err, wantErr)
 	}
@@ -358,7 +407,7 @@ func TestHelmReleaseCRDPresentVia_DiscoveryError(t *testing.T) {
 	}
 }
 
-func TestHelmReleaseCRDPresentVia_CtxCancelled(t *testing.T) {
+func TestResolveHelmReleaseGVRVia_CtxCancelled(t *testing.T) {
 	// Block ServerGroups forever; cancel the context immediately.
 	// The probe must return without waiting for the in-flight call.
 	block := make(chan struct{})
@@ -374,7 +423,7 @@ func TestHelmReleaseCRDPresentVia_CtxCancelled(t *testing.T) {
 		err error
 	)
 	go func() {
-		ok, err = helmReleaseCRDPresentVia(ctx, disc)
+		_, ok, err = resolveHelmReleaseGVRVia(ctx, disc)
 		close(done)
 	}()
 	select {
