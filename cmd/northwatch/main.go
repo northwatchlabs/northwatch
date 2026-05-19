@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -69,6 +70,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  --api-token        Bearer token for write endpoints (>=16 chars).")
 	fmt.Fprintln(os.Stderr, "                     Reads NORTHWATCH_API_TOKEN env when unset.")
 	fmt.Fprintln(os.Stderr, "                     Empty disables writes (POSTs return 401).")
+	fmt.Fprintln(os.Stderr, "  --poll-seconds     HTMX polling interval in seconds (default 5)")
 }
 
 func serveCmd(args []string) int {
@@ -93,6 +95,9 @@ func serveCmd(args []string) int {
 	apiToken := fs.String("api-token",
 		envOr("NORTHWATCH_API_TOKEN", ""),
 		"Bearer token gating POST endpoints (>=16 chars). Empty disables writes.")
+	pollSeconds := fs.Int("poll-seconds",
+		envOrInt("NORTHWATCH_POLL_SECONDS", 5),
+		"HTMX polling interval in seconds (>=1)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -114,6 +119,11 @@ func serveCmd(args []string) int {
 		return 1
 	default:
 		logger.Info("api token configured")
+	}
+
+	if *pollSeconds < 1 {
+		logger.Error("poll-seconds must be >= 1", "got", *pollSeconds)
+		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -141,7 +151,7 @@ func serveCmd(args []string) int {
 		return 1
 	}
 
-	h, err := server.New(logger, st, *apiToken)
+	h, err := server.New(logger, st, *apiToken, *pollSeconds)
 	if err != nil {
 		logger.Error("server init failed", "err", err)
 		return 1
@@ -251,6 +261,22 @@ func envOrBool(key string, def bool) bool {
 	default:
 		return false
 	}
+}
+
+// envOrInt reads an int env var. Unset, empty, or non-numeric values
+// fall back to def. Negative values are passed through — callers
+// are responsible for range validation (e.g., serveCmd rejects
+// poll-seconds < 1).
+func envOrInt(key string, def int) int {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 // runConfigSync loads configPath, translates Specs into ComponentSpecs,

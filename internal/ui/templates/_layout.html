@@ -10,10 +10,7 @@
 <body class="bg-gray-50 text-gray-900 min-h-screen">
   {{template "header" .}}
   <main class="max-w-3xl mx-auto px-4 py-8">
-    {{template "banner" .}}
-    <section class="mt-6 space-y-3">
-      {{range .Components}}{{template "card" .}}{{end}}
-    </section>
+    {{template "status_section" .}}
   </main>
 </body>
 </html>

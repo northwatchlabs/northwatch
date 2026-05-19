@@ -1,1 +1,21 @@
-{{define "banner"}}{{end}}
+{{define "banner"}}
+{{if eq .BannerState "incident"}}
+<div class="rounded-lg border border-red-200 bg-red-50 p-4 flex items-center gap-3">
+  <span class="h-2.5 w-2.5 rounded-full bg-red-500"></span>
+  <div>
+    <h2 class="font-medium text-red-900">{{.ActiveIncident.Title}}</h2>
+    <p class="text-sm text-red-700 capitalize">{{.ActiveIncident.Status}}</p>
+  </div>
+</div>
+{{else if eq .BannerState "degraded"}}
+<div class="rounded-lg border border-yellow-200 bg-yellow-50 p-4 flex items-center gap-3">
+  <span class="h-2.5 w-2.5 rounded-full bg-yellow-500"></span>
+  <h2 class="font-medium text-yellow-900">Some Systems Degraded</h2>
+</div>
+{{else}}
+<div class="rounded-lg border border-green-200 bg-green-50 p-4 flex items-center gap-3">
+  <span class="h-2.5 w-2.5 rounded-full bg-green-500"></span>
+  <h2 class="font-medium text-green-900">All Systems Operational</h2>
+</div>
+{{end}}
+{{end}}
