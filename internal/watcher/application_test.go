@@ -13,6 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	dynfake "k8s.io/client-go/dynamic/fake"
+	testingclock "k8s.io/utils/clock/testing"
 
 	"github.com/northwatchlabs/northwatch/internal/component"
 	"github.com/northwatchlabs/northwatch/internal/config"
@@ -49,7 +50,7 @@ func setAppHealth(t *testing.T, u *unstructured.Unstructured, health string) {
 
 func startApplicationWatcher(t *testing.T, cs dynamic.Interface, rs store.Store, specs []config.Spec) func() {
 	t.Helper()
-	w := NewApplicationWatcher(cs, rs, specs, quietLogger())
+	w := NewApplicationWatcher(cs, rs, specs, quietLogger(), 0, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- w.Start(ctx) }()
@@ -187,6 +188,117 @@ func TestApplicationWatcher_SuspendedPreservesStatus(t *testing.T) {
 	rs.waitForCalls(t, 2)
 	if got := rs.snapshot()[1].Status; got != component.StatusDown {
 		t.Errorf("status after resume = %q, want %q", got, component.StatusDown)
+	}
+}
+
+// TestApplicationWatcher_SuspendedPreservesPending verifies that a
+// Suspended event arriving while a downward (degraded) transition is
+// pending does NOT clear the pending entry, and that a subsequent
+// recovery to Healthy clears it correctly — leaving the store at its
+// original operational status and the Debouncer with no stale entry.
+func TestApplicationWatcher_SuspendedPreservesPending(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const window = 60 * time.Second
+	t0 := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	clk := testingclock.NewFakeClock(t0)
+	st := newRecordStore()
+	require(t, st.UpsertComponent(ctx, component.Component{
+		Kind: "Application", Namespace: "argocd", Name: "my-app",
+		DisplayName: "my-app", Status: component.StatusOperational,
+	}))
+
+	specs := []config.Spec{{Kind: "Application", Namespace: "argocd", Name: "my-app"}}
+	cs := newAppDynamicClient()
+	w := NewApplicationWatcher(cs, st, specs, quietLogger(), window, clk)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Start(ctx) }()
+	select {
+	case <-w.Synced():
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not sync within 2s")
+	}
+
+	res := cs.Resource(ApplicationGVR).Namespace("argocd")
+
+	// Step 1: store is already operational (seeded above). The initial
+	// upsert count equals the seed (1).
+	const seedCount = 1
+	if got := st.count(); got != seedCount {
+		t.Fatalf("seed count = %d, want %d", got, seedCount)
+	}
+
+	// Step 2: create the Application in Progressing → degraded pending.
+	if _, err := res.Create(ctx, newApplication("argocd", "my-app", "Progressing"), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create progressing: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	// No store write — the downgrade is debounced.
+	if got := st.count(); got != seedCount {
+		t.Fatalf("after progressing: count = %d, want %d (debounced)", got, seedCount)
+	}
+	if got, err := st.GetComponent(ctx, "Application/argocd/my-app"); err != nil || got.Status != component.StatusOperational {
+		t.Fatalf("after progressing: store = (%q, %v), want operational", got.Status, err)
+	}
+
+	// Step 3: Suspended → handle short-circuits, pending preserved.
+	cur, _ := res.Get(ctx, "my-app", metav1.GetOptions{})
+	setAppHealth(t, cur, "Suspended")
+	if _, err := res.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update suspended: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := st.count(); got != seedCount {
+		t.Fatalf("after suspended: count = %d, want %d", got, seedCount)
+	}
+
+	// Step 4: advance past the window. Timer fires → retry → handle
+	// re-fetches the cached (now Suspended) object → short-circuits
+	// again. No write must happen.
+	clk.Step(window + time.Second)
+	time.Sleep(50 * time.Millisecond)
+	if got := st.count(); got != seedCount {
+		t.Fatalf("after timer fire (still suspended): count = %d, want %d", got, seedCount)
+	}
+	if got, err := st.GetComponent(ctx, "Application/argocd/my-app"); err != nil || got.Status != component.StatusOperational {
+		t.Fatalf("after timer fire: store = (%q, %v), want operational", got.Status, err)
+	}
+
+	// Step 5: recover to Healthy. prev=operational, next=operational
+	// (store still operational), but pending.target == degraded ≠ next
+	// → Apply clears the pending and returns no-op. No write.
+	cur, _ = res.Get(ctx, "my-app", metav1.GetOptions{})
+	setAppHealth(t, cur, "Healthy")
+	if _, err := res.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update healthy: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := st.count(); got != seedCount {
+		t.Fatalf("after recovery: count = %d, want %d", got, seedCount)
+	}
+	if got, err := st.GetComponent(ctx, "Application/argocd/my-app"); err != nil || got.Status != component.StatusOperational {
+		t.Fatalf("after recovery: store = (%q, %v), want operational", got.Status, err)
+	}
+
+	// Step 6: a NEW Progressing event must be treated as a first
+	// observation (write=false, no immediate flip). If recovery had
+	// failed to clear the pending entry, the watcher could write
+	// immediately on this event (since elapsed since the original
+	// pending.since now exceeds window).
+	cur, _ = res.Get(ctx, "my-app", metav1.GetOptions{})
+	setAppHealth(t, cur, "Progressing")
+	if _, err := res.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update progressing again: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := st.count(); got != seedCount {
+		t.Fatalf("after re-progressing: count = %d, want %d (fresh pending)", got, seedCount)
+	}
+	if got, err := st.GetComponent(ctx, "Application/argocd/my-app"); err != nil || got.Status != component.StatusOperational {
+		t.Fatalf("after re-progressing: store = (%q, %v), want operational", got.Status, err)
 	}
 }
 
@@ -466,38 +578,4 @@ func TestApplicationCRDPresentVia_CtxCancelled(t *testing.T) {
 	if ok {
 		t.Errorf("ok = true, want false on cancel")
 	}
-}
-
-func TestComputeApplicationStatus(t *testing.T) {
-	cases := []struct {
-		name   string
-		health string
-		want   component.Status
-		wantOK bool
-	}{
-		{name: "Healthy → operational", health: "Healthy", want: component.StatusOperational, wantOK: true},
-		{name: "Progressing → degraded", health: "Progressing", want: component.StatusDegraded, wantOK: true},
-		{name: "Degraded → down", health: "Degraded", want: component.StatusDown, wantOK: true},
-		{name: "Missing → down", health: "Missing", want: component.StatusDown, wantOK: true},
-		{name: "Unknown → unknown", health: "Unknown", want: component.StatusUnknown, wantOK: true},
-		{name: "Suspended → preserve previous", health: "Suspended", want: "", wantOK: false},
-		{name: "unrecognized value → unknown", health: "Foobar", want: component.StatusUnknown, wantOK: true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			u := newApplication("argocd", "my-app", tc.health)
-			got, ok := computeApplicationStatus(u)
-			if got != tc.want || ok != tc.wantOK {
-				t.Errorf("got (%q, %v), want (%q, %v)", got, ok, tc.want, tc.wantOK)
-			}
-		})
-	}
-
-	t.Run("no health field → unknown, ok", func(t *testing.T) {
-		u := newApplication("argocd", "my-app", "")
-		got, ok := computeApplicationStatus(u)
-		if got != component.StatusUnknown || !ok {
-			t.Errorf("got (%q, %v), want (%q, true)", got, ok, component.StatusUnknown)
-		}
-	})
 }

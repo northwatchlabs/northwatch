@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,9 +19,11 @@ import (
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/utils/clock"
 
 	"github.com/northwatchlabs/northwatch/internal/component"
 	"github.com/northwatchlabs/northwatch/internal/config"
+	"github.com/northwatchlabs/northwatch/internal/status"
 	"github.com/northwatchlabs/northwatch/internal/store"
 )
 
@@ -104,27 +108,17 @@ func applicationCRDPresentVia(ctx context.Context, disc applicationResourceDisco
 }
 
 // ApplicationWatcher watches ArgoCD Application events for the
-// configured component set and reconciles status from
-// status.health.status. Only Applications whose (namespace, name)
-// appears in the configured set produce store writes; all others are
-// ignored.
+// configured component set, maps them via status.MapApplication, and
+// routes the (prev, next) transition through its own Debouncer before
+// writing to the store. Status mapping rules and the debounce protocol
+// live in internal/status/.
 //
-// Status mapping (see computeApplicationStatus):
-//   - Healthy                  → operational
-//   - Progressing              → degraded
-//   - Degraded, Missing        → down
-//   - Unknown                  → unknown
-//   - Suspended                → preserve previous (no upsert)
-//   - field missing            → unknown (initial state)
-//   - unrecognized             → unknown (forward-compat)
-//
-// Only Suspended preserves the previously recorded status: it's an
-// intentional operator action ("I paused syncing"), and flipping the
-// status page on that signal would be noise. Unknown is the opposite
-// — it means ArgoCD lost the signal — so we surface it as `unknown`
-// rather than silently holding a stale `operational`. Same logic for
-// future unrecognized health values: never lie about state we don't
-// have.
+// Suspended is the one mapping outcome that short-circuits the
+// debouncer entirely: status.MapApplication returns ok=false, handle()
+// returns immediately without calling Debouncer.Apply, and any
+// existing pending entry is preserved. When ArgoCD resumes syncing
+// and the next event produces a real status, that pending entry (if
+// any) carries forward unchanged.
 //
 // In-cluster RBAC: needs get, list, watch on
 // argoproj.io/v1alpha1/applications. The Helm chart (#24) will ship
@@ -134,9 +128,13 @@ type ApplicationWatcher struct {
 	store   store.Store
 	watched map[types.NamespacedName]config.Spec
 	logger  *slog.Logger
+	window  time.Duration
+	clk     clock.WithDelayedExecution
 
-	mu       sync.Mutex
-	lastSeen map[types.NamespacedName]component.Status
+	// populated in Start once the informer factory exists
+	lister    cache.GenericLister
+	debouncer *status.Debouncer
+	ctx       context.Context
 
 	syncedCh   chan struct{}
 	syncedOnce sync.Once
@@ -145,14 +143,22 @@ type ApplicationWatcher struct {
 // NewApplicationWatcher mirrors NewHelmReleaseWatcher: it filters
 // specs to Kind == "Application" and builds the lookup map. An empty
 // specs slice is valid — the watcher runs but writes nothing.
+// window=0 disables debouncing (Apply writes immediately). clk=nil
+// defaults to clock.RealClock{}. A nil logger falls back to
+// slog.Default().
 func NewApplicationWatcher(
 	client dynamic.Interface,
 	st store.Store,
 	specs []config.Spec,
 	logger *slog.Logger,
+	window time.Duration,
+	clk clock.WithDelayedExecution,
 ) *ApplicationWatcher {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if clk == nil {
+		clk = clock.RealClock{}
 	}
 	watched := make(map[types.NamespacedName]config.Spec)
 	for _, s := range specs {
@@ -167,7 +173,8 @@ func NewApplicationWatcher(
 		store:    st,
 		watched:  watched,
 		logger:   logger.With("watcher", "application"),
-		lastSeen: make(map[types.NamespacedName]component.Status),
+		window:   window,
+		clk:      clk,
 		syncedCh: make(chan struct{}),
 	}
 }
@@ -181,8 +188,12 @@ func (w *ApplicationWatcher) Synced() <-chan struct{} {
 // Start runs the dynamic informer until ctx is cancelled. Blocks; the
 // caller is expected to launch it in its own goroutine.
 func (w *ApplicationWatcher) Start(ctx context.Context) error {
+	w.ctx = ctx
 	factory := dynamicinformer.NewDynamicSharedInformerFactory(w.client, 0)
 	informer := factory.ForResource(ApplicationGVR).Informer()
+	w.lister = factory.ForResource(ApplicationGVR).Lister()
+	w.debouncer = status.NewDebouncer(w.window, w.clk, w.retry)
+	defer w.debouncer.Stop()
 
 	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
@@ -200,8 +211,9 @@ func (w *ApplicationWatcher) Start(ctx context.Context) error {
 			w.handle(ctx, u)
 		},
 		DeleteFunc: func(_ interface{}) {
-			// Same semantics as the other watchers: the last status
-			// sticks; we don't clear lastSeen or write a recovery.
+			// Last status sticks. Stale pending state for a deleted
+			// object is cleared by the retry callback's lister-miss
+			// branch when the timer fires.
 		},
 	}); err != nil {
 		return fmt.Errorf("watcher: add event handler: %w", err)
@@ -228,84 +240,86 @@ func (w *ApplicationWatcher) handle(ctx context.Context, u *unstructured.Unstruc
 		return
 	}
 
-	status, ok := computeApplicationStatus(u)
+	next, ok := status.MapApplication(u)
 	if !ok {
-		// Suspended: preserve whatever status is already recorded.
-		// Leave lastSeen alone so the next real transition is still
-		// observed.
+		// Suspended: preserve previous status (no store write). We
+		// also do NOT call Debouncer.Apply here, so any pending
+		// downgrade recorded BEFORE the Suspended state is preserved
+		// unchanged — when ArgoCD resumes syncing and the next event
+		// produces a real status, the existing pending entry (if
+		// any) carries forward.
 		return
 	}
 
-	w.mu.Lock()
-	prev, seen := w.lastSeen[key]
-	if seen && prev == status {
-		w.mu.Unlock()
+	id := (component.Component{
+		Kind: "Application", Namespace: spec.Namespace, Name: spec.Name,
+	}).ID()
+
+	prev, err := w.fetchPrev(ctx, id)
+	if err != nil {
+		w.logger.Error("get prev failed", "err", err, "id", id)
 		return
 	}
-	w.lastSeen[key] = status
-	w.mu.Unlock()
 
-	c := component.Component{
-		Kind:        "Application",
-		Namespace:   spec.Namespace,
-		Name:        spec.Name,
-		DisplayName: displayNameOrName(spec),
-		Status:      status,
-	}
-	if err := w.store.UpsertComponent(ctx, c); err != nil {
-		w.logger.Error("upsert failed",
-			"err", err,
-			"id", c.ID(),
-			"status", string(status),
-		)
-		w.mu.Lock()
-		if seen {
-			w.lastSeen[key] = prev
-		} else {
-			delete(w.lastSeen, key)
+	write, finalStatus, retryAfter := w.debouncer.Apply(id, prev, next, w.clk.Now())
+	if write {
+		c := component.Component{
+			Kind:        "Application",
+			Namespace:   spec.Namespace,
+			Name:        spec.Name,
+			DisplayName: displayNameOrName(spec),
+			Status:      finalStatus,
 		}
-		w.mu.Unlock()
+		if err := w.store.UpsertComponent(ctx, c); err != nil {
+			w.logger.Error("upsert failed",
+				"err", err,
+				"id", id,
+				"status", string(finalStatus),
+			)
+			return
+		}
+		w.logger.Info("reconciled", "id", id, "status", string(finalStatus))
 		return
 	}
-	w.logger.Info("reconciled",
-		"id", c.ID(),
-		"status", string(status),
-	)
+	if retryAfter > 0 {
+		w.logger.Debug("debounced",
+			"id", id,
+			"prev", string(prev),
+			"next", string(next),
+			"retry_after", retryAfter,
+		)
+	}
 }
 
-// computeApplicationStatus maps status.health.status to a
-// component.Status. The second return is false only for `Suspended`
-// — callers skip the upsert in that case to preserve the previously
-// recorded status.
-//
-// Explicit `Unknown` and unrecognized future values map to
-// StatusUnknown (with ok=true) rather than preserve-previous. ArgoCD
-// reports Unknown when it has lost the health signal (repo-server
-// hiccup, failed refresh, missing health check), and preserving a
-// stale `operational` while we genuinely don't know the state would
-// be a status-page lie.
-//
-// Returns (StatusUnknown, true) when the field is missing entirely
-// (typical for an Application that ArgoCD has not yet observed) so
-// the initial state is recorded explicitly rather than left at the
-// SyncComponents default.
-func computeApplicationStatus(u *unstructured.Unstructured) (component.Status, bool) {
-	health, found, err := unstructured.NestedString(u.Object, "status", "health", "status")
-	if err != nil || !found || health == "" {
-		return component.StatusUnknown, true
+func (w *ApplicationWatcher) fetchPrev(ctx context.Context, id string) (component.Status, error) {
+	got, err := w.store.GetComponent(ctx, id)
+	if errors.Is(err, store.ErrNotFound) {
+		return component.StatusUnknown, nil
 	}
-	switch health {
-	case "Healthy":
-		return component.StatusOperational, true
-	case "Progressing":
-		return component.StatusDegraded, true
-	case "Degraded", "Missing":
-		return component.StatusDown, true
-	case "Unknown":
-		return component.StatusUnknown, true
-	case "Suspended":
-		return "", false
-	default:
-		return component.StatusUnknown, true
+	if err != nil {
+		return "", err
 	}
+	return got.Status, nil
+}
+
+// retry is the Debouncer's per-key callback. id format is
+// "Application/<namespace>/<name>" — the canonical Component ID.
+func (w *ApplicationWatcher) retry(id string) {
+	parts := strings.SplitN(id, "/", 3)
+	if len(parts) != 3 || parts[0] != "Application" {
+		return
+	}
+	obj, err := w.lister.ByNamespace(parts[1]).Get(parts[2])
+	if err != nil || obj == nil {
+		// Object gone from the lister cache. Clear pending entry so
+		// a same-ID recreate is treated as a fresh observation.
+		w.debouncer.Forget(id)
+		return
+	}
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		w.debouncer.Forget(id)
+		return
+	}
+	w.handle(w.ctx, u)
 }

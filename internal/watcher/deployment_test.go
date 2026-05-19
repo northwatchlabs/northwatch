@@ -9,8 +9,10 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	testingclock "k8s.io/utils/clock/testing"
 
 	"github.com/northwatchlabs/northwatch/internal/component"
 	"github.com/northwatchlabs/northwatch/internal/config"
@@ -33,11 +35,15 @@ func quietLogger() *slog.Logger {
 type recordStore struct {
 	mu       sync.Mutex
 	calls    []component.Component
+	state    map[string]component.Component
 	upsertCh chan struct{}
 }
 
 func newRecordStore() *recordStore {
-	return &recordStore{upsertCh: make(chan struct{}, 64)}
+	return &recordStore{
+		state:    make(map[string]component.Component),
+		upsertCh: make(chan struct{}, 64),
+	}
 }
 
 func (s *recordStore) Close() error                  { return nil }
@@ -45,12 +51,18 @@ func (s *recordStore) Migrate(context.Context) error { return nil }
 func (s *recordStore) ListComponents(context.Context) ([]component.Component, error) {
 	return nil, nil
 }
-func (s *recordStore) GetComponent(context.Context, string) (component.Component, error) {
+func (s *recordStore) GetComponent(_ context.Context, id string) (component.Component, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c, ok := s.state[id]; ok {
+		return c, nil
+	}
 	return component.Component{}, store.ErrNotFound
 }
 func (s *recordStore) UpsertComponent(_ context.Context, c component.Component) error {
 	s.mu.Lock()
 	s.calls = append(s.calls, c)
+	s.state[c.ID()] = c
 	s.mu.Unlock()
 	select {
 	case s.upsertCh <- struct{}{}:
@@ -171,7 +183,7 @@ func updateDeploymentStatus(t *testing.T, cs *fake.Clientset, ns, name string, d
 // would log after the test has finished.
 func startWatcher(t *testing.T, cs *fake.Clientset, rs store.Store, specs []config.Spec) func() {
 	t.Helper()
-	w := NewDeploymentWatcher(cs, rs, specs, quietLogger())
+	w := NewDeploymentWatcher(cs, rs, specs, quietLogger(), 0, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() { errCh <- w.Start(ctx) }()
@@ -379,12 +391,245 @@ func TestDeploymentWatcher_DisplayNamePropagation(t *testing.T) {
 	}
 }
 
-func TestComputeDeploymentStatus_NilReplicasDefaultsToOne(t *testing.T) {
-	d := &appsv1.Deployment{
-		Spec:   appsv1.DeploymentSpec{Replicas: nil},
-		Status: appsv1.DeploymentStatus{ReadyReplicas: 1},
+// require fails the test fatally on err. Lightweight local helper —
+// avoids dragging testify in for the two debounce tests below.
+func require(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := computeDeploymentStatus(d); got != component.StatusOperational {
-		t.Errorf("got %q, want %q (nil replicas should default to 1)", got, component.StatusOperational)
+}
+
+// newTestStore returns a *recordStore that tracks the most recent
+// upsert per ID — enough for the debounce tests that need
+// GetComponent to round-trip last-written state. Using the
+// lightweight in-memory double instead of OpenSQLite(":memory:")
+// avoids modernc.org/sqlite's per-connection-isolated database
+// behavior (an 8-connection pool can land Get on a connection that
+// never saw the schema migration).
+func newTestStore(t *testing.T, _ context.Context) *recordStore {
+	t.Helper()
+	return newRecordStore()
+}
+
+// updateDeployment ensures the named deployment exists (creating it
+// on the first call) and replaces its spec/status with the supplied
+// template's. The template's namespace/name are coerced to the
+// supplied ns/name so callers can pass a fresh fixture without
+// repeating identity.
+func updateDeployment(t *testing.T, cs *fake.Clientset, ns, name string, tmpl *appsv1.Deployment) {
+	t.Helper()
+	ctx := context.Background()
+	cur, err := cs.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		// First call — create it.
+		obj := tmpl.DeepCopy()
+		obj.Namespace = ns
+		obj.Name = name
+		if _, cerr := cs.AppsV1().Deployments(ns).Create(ctx, obj, metav1.CreateOptions{}); cerr != nil {
+			t.Fatalf("create %s/%s: %v", ns, name, cerr)
+		}
+		return
+	}
+	cur.Spec = tmpl.Spec
+	cur.Status = tmpl.Status
+	if _, err := cs.AppsV1().Deployments(ns).Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update %s/%s: %v", ns, name, err)
+	}
+}
+
+// deployWithReplicas builds a Deployment template with no
+// Progressing condition — replica-count fallback only.
+func deployWithReplicas(desired, ready int32) *appsv1.Deployment {
+	d := desired
+	return &appsv1.Deployment{
+		Spec:   appsv1.DeploymentSpec{Replicas: &d},
+		Status: appsv1.DeploymentStatus{ReadyReplicas: ready},
+	}
+}
+
+// deployWithProgressing builds a Deployment template with a
+// Progressing condition of the supplied status/reason.
+func deployWithProgressing(s corev1.ConditionStatus, reason string, desired, ready int32) *appsv1.Deployment {
+	d := deployWithReplicas(desired, ready)
+	d.Status.Conditions = []appsv1.DeploymentCondition{
+		{Type: appsv1.DeploymentProgressing, Status: s, Reason: reason},
+	}
+	return d
+}
+
+// TestDeploymentWatcher_RollingUpdateNoFlicker simulates a short
+// rolling update entirely within the debounce window. The watcher
+// must keep the component at operational for the duration; no
+// degraded write hits the store.
+func TestDeploymentWatcher_RollingUpdateNoFlicker(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const window = 60 * time.Second
+	t0 := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	clk := testingclock.NewFakeClock(t0)
+	st := newTestStore(t, ctx)
+	require(t, st.UpsertComponent(ctx, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "nginx",
+		DisplayName: "nginx", Status: component.StatusOperational,
+	}))
+
+	specs := []config.Spec{{Kind: "Deployment", Namespace: "default", Name: "nginx"}}
+	client := fake.NewSimpleClientset()
+	w := NewDeploymentWatcher(client, st, specs, quietLogger(), window, clk)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Start(ctx) }()
+	select {
+	case <-w.Synced():
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not sync within 2s")
+	}
+
+	// Rolling update begins: ready=1/3 (degraded). Several events.
+	for i := 0; i < 5; i++ {
+		updateDeployment(t, client, "default", "nginx", deployWithReplicas(3, 1))
+		clk.Step(6 * time.Second) // 30s total
+	}
+
+	// Within window: store should still say operational.
+	got, err := st.GetComponent(ctx, "Deployment/default/nginx")
+	require(t, err)
+	if got.Status != component.StatusOperational {
+		t.Fatalf("during rollout: got %q, want operational", got.Status)
+	}
+
+	// Rollout completes.
+	updateDeployment(t, client, "default", "nginx", deployWithReplicas(3, 3))
+	// Poll briefly — informer dispatch is async.
+	deadline := time.After(2 * time.Second)
+	for {
+		got, err = st.GetComponent(ctx, "Deployment/default/nginx")
+		require(t, err)
+		if got.Status == component.StatusOperational {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("after rollout: got %q, want operational", got.Status)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// TestDeploymentWatcher_StuckRolloutFlipsAfterWindow simulates a
+// rollout stuck at ready < desired for longer than the window. The
+// watcher MUST surface this as degraded once the window elapses.
+func TestDeploymentWatcher_StuckRolloutFlipsAfterWindow(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const window = 60 * time.Second
+	t0 := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	clk := testingclock.NewFakeClock(t0)
+	st := newTestStore(t, ctx)
+	require(t, st.UpsertComponent(ctx, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "nginx",
+		DisplayName: "nginx", Status: component.StatusOperational,
+	}))
+
+	specs := []config.Spec{{Kind: "Deployment", Namespace: "default", Name: "nginx"}}
+	client := fake.NewSimpleClientset()
+	w := NewDeploymentWatcher(client, st, specs, quietLogger(), window, clk)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Start(ctx) }()
+	select {
+	case <-w.Synced():
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not sync within 2s")
+	}
+
+	// Stuck rollout: Progressing=True/ReplicaSetUpdated, ready < desired.
+	stuck := deployWithProgressing(corev1.ConditionTrue, "ReplicaSetUpdated", 3, 1)
+	updateDeployment(t, client, "default", "nginx", stuck)
+
+	// Wait briefly for the informer to deliver the event and the
+	// Debouncer to record the pending downward target.
+	time.Sleep(50 * time.Millisecond)
+
+	// Advance past window — timer fires, retry callback re-handles.
+	clk.Step(window + time.Second)
+
+	// Poll briefly for the upsert (the retry runs on a goroutine).
+	deadline := time.After(2 * time.Second)
+	for {
+		got, err := st.GetComponent(ctx, "Deployment/default/nginx")
+		require(t, err)
+		if got.Status == component.StatusDegraded {
+			return // success
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("expected degraded after window; got %q", got.Status)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// TestDeploymentWatcher_ProgressDeadlineExceededFlipsAfterWindow
+// verifies that a Deployment surfacing
+// Progressing=False/ProgressDeadlineExceeded — which MapDeployment
+// maps directly to `down` — is still routed through the debouncer
+// and only writes to the store after the window elapses.
+func TestDeploymentWatcher_ProgressDeadlineExceededFlipsAfterWindow(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const window = 60 * time.Second
+	t0 := time.Date(2026, 5, 19, 12, 0, 0, 0, time.UTC)
+	clk := testingclock.NewFakeClock(t0)
+	st := newTestStore(t, ctx)
+	require(t, st.UpsertComponent(ctx, component.Component{
+		Kind: "Deployment", Namespace: "default", Name: "nginx",
+		DisplayName: "nginx", Status: component.StatusOperational,
+	}))
+
+	specs := []config.Spec{{Kind: "Deployment", Namespace: "default", Name: "nginx"}}
+	client := fake.NewSimpleClientset()
+	w := NewDeploymentWatcher(client, st, specs, quietLogger(), window, clk)
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- w.Start(ctx) }()
+	select {
+	case <-w.Synced():
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not sync within 2s")
+	}
+
+	// Progress deadline exceeded: Progressing=False/ProgressDeadlineExceeded.
+	// MapDeployment returns `down`; debouncer records pending.
+	failed := deployWithProgressing(corev1.ConditionFalse, "ProgressDeadlineExceeded", 3, 0)
+	updateDeployment(t, client, "default", "nginx", failed)
+
+	// Wait briefly for the informer to deliver the event and the
+	// Debouncer to record the pending downward target.
+	time.Sleep(50 * time.Millisecond)
+
+	// Advance past window — timer fires, retry callback re-handles.
+	clk.Step(window + time.Second)
+
+	// Poll briefly for the upsert (the retry runs on a goroutine).
+	deadline := time.After(2 * time.Second)
+	for {
+		got, err := st.GetComponent(ctx, "Deployment/default/nginx")
+		require(t, err)
+		if got.Status == component.StatusDown {
+			return // success
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("expected down after window; got %q", got.Status)
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
 }
