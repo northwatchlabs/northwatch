@@ -243,3 +243,61 @@ func TestServeCmd_NoClusterShortCircuit(t *testing.T) {
 		t.Fatal("bad kubeconfig: got nil err, want error")
 	}
 }
+
+func TestEnvOrInt(t *testing.T) {
+	cases := []struct {
+		name string
+		val  string
+		set  bool
+		def  int
+		want int
+	}{
+		{name: "valid positive", val: "10", set: true, def: 5, want: 10},
+		{name: "valid zero", val: "0", set: true, def: 5, want: 0},
+		{name: "negative", val: "-3", set: true, def: 5, want: -3},
+		{name: "garbage falls back", val: "five", set: true, def: 5, want: 5},
+		{name: "empty falls back", val: "", set: true, def: 7, want: 7},
+		{name: "unset falls back", val: "", set: false, def: 7, want: 7},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const key = "NW_TEST_ENVORINT"
+			if tc.set {
+				t.Setenv(key, tc.val)
+			} else {
+				t.Setenv(key, "ignored")
+				if err := os.Unsetenv(key); err != nil {
+					t.Fatalf("Unsetenv: %v", err)
+				}
+			}
+			if got := envOrInt(key, tc.def); got != tc.want {
+				t.Errorf("envOrInt(%q, %d) [val=%q] = %d, want %d", key, tc.def, tc.val, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestServeCmd_PollSecondsValidation(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		val  string
+		want int // expected exit code
+	}{
+		{name: "zero rejected", val: "0", want: 1},
+		{name: "negative rejected", val: "-5", want: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code := serveCmd([]string{
+				"--no-cluster",
+				"--db", filepath.Join(t.TempDir(), "nw.db"),
+				"--config", writeConfig(t, cfgAB),
+				"--poll-seconds", tc.val,
+			})
+			if code != tc.want {
+				t.Errorf("serveCmd exit = %d, want %d", code, tc.want)
+			}
+		})
+	}
+}

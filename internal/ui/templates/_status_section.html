@@ -1,0 +1,11 @@
+{{define "status_section"}}
+<div id="status"
+     hx-get="/api/status"
+     hx-trigger="every {{.PollSeconds}}s"
+     hx-swap="outerHTML">
+  {{template "banner" .}}
+  <section class="mt-6 space-y-3">
+    {{range .Components}}{{template "card" .}}{{end}}
+  </section>
+</div>
+{{end}}

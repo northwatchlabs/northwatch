@@ -43,7 +43,7 @@ func newHandlerWith(t *testing.T, token string, seed ...component.Component) (ht
 			t.Fatalf("UpsertComponent: %v", err)
 		}
 	}
-	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)), st, token)
+	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)), st, token, 5)
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestAPIComponents_StoreError(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)),
-		failingStore{Store: real}, "")
+		failingStore{Store: real}, "", 5)
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
@@ -602,5 +602,128 @@ func TestPostIncidentsResolveRequiresAuth(t *testing.T) {
 	rr := resolveIncident(t, h, id, false)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rr.Code)
+	}
+}
+
+func TestIndex_BannerOperational(t *testing.T) {
+	t.Parallel()
+	h := newHandler(t,
+		component.Component{Kind: "Deployment", Namespace: "default", Name: "a", DisplayName: "A", Status: component.StatusOperational},
+	)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	h.ServeHTTP(rr, req)
+	body := rr.Body.String()
+	if !strings.Contains(body, "All Systems Operational") {
+		t.Errorf("missing operational banner; body=%s", body)
+	}
+	if strings.Contains(body, "Some Systems Degraded") {
+		t.Errorf("operational state should not render degraded banner")
+	}
+}
+
+func TestIndex_BannerDegradedWhenComponentDown(t *testing.T) {
+	t.Parallel()
+	h := newHandler(t,
+		component.Component{Kind: "Deployment", Namespace: "default", Name: "a", DisplayName: "A", Status: component.StatusOperational},
+		component.Component{Kind: "Deployment", Namespace: "default", Name: "b", DisplayName: "B", Status: component.StatusDown},
+	)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	h.ServeHTTP(rr, req)
+	body := rr.Body.String()
+	if !strings.Contains(body, "Some Systems Degraded") {
+		t.Errorf("missing degraded banner; body=%s", body)
+	}
+	if strings.Contains(body, "All Systems Operational") {
+		t.Errorf("degraded state should not render operational banner")
+	}
+}
+
+func TestIndex_BannerIncidentTakesPriority(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, err := store.OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	comp := component.Component{Kind: "Deployment", Namespace: "default", Name: "a", DisplayName: "A", Status: component.StatusDown}
+	if err := st.UpsertComponent(ctx, comp); err != nil {
+		t.Fatalf("UpsertComponent: %v", err)
+	}
+	incSvc := incident.NewService(st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if _, err := incSvc.CreateIncident(ctx, comp.ID(), "Demo outage"); err != nil {
+		t.Fatalf("CreateIncident: %v", err)
+	}
+	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)), st, "", 5)
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	h.ServeHTTP(rr, req)
+	body := rr.Body.String()
+	if !strings.Contains(body, "Demo outage") {
+		t.Errorf("missing incident title; body=%s", body)
+	}
+	if strings.Contains(body, "Some Systems Degraded") {
+		t.Errorf("incident state should not render degraded banner even when components are down")
+	}
+	if strings.Contains(body, "All Systems Operational") {
+		t.Errorf("incident state should not render operational banner")
+	}
+}
+
+func TestApiStatus_PartialIncludesPollingAttrs(t *testing.T) {
+	t.Parallel()
+	h := newHandler(t,
+		component.Component{Kind: "Deployment", Namespace: "default", Name: "a", DisplayName: "A", Status: component.StatusOperational},
+	)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+	if cc := rr.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", cc)
+	}
+	body := rr.Body.String()
+	wants := []string{
+		`id="status"`,
+		`hx-get="/api/status"`,
+		`hx-trigger="every 5s"`,
+		`hx-swap="outerHTML"`,
+		`All Systems Operational`,
+	}
+	for _, w := range wants {
+		if !strings.Contains(body, w) {
+			t.Errorf("partial missing %q; body=%s", w, body)
+		}
+	}
+	for _, banned := range []string{"<html", "<body", "<!DOCTYPE"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("partial should not contain %q; body=%s", banned, body)
+		}
+	}
+}
+
+func TestApiStatus_RendersDegradedWhenComponentDown(t *testing.T) {
+	t.Parallel()
+	h := newHandler(t,
+		component.Component{Kind: "Deployment", Namespace: "default", Name: "a", DisplayName: "A", Status: component.StatusDown},
+	)
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	h.ServeHTTP(rr, req)
+	if !strings.Contains(rr.Body.String(), "Some Systems Degraded") {
+		t.Errorf("partial missing degraded banner; body=%s", rr.Body.String())
 	}
 }
