@@ -26,16 +26,22 @@ import (
 	"github.com/northwatchlabs/northwatch/internal/store"
 )
 
-// HelmReleaseGVR is the dynamic GroupVersionResource for Flux's
-// helm.toolkit.fluxcd.io/v2 HelmRelease custom resource.
-var HelmReleaseGVR = schema.GroupVersionResource{
-	Group:    "helm.toolkit.fluxcd.io",
-	Version:  "v2",
-	Resource: "helmreleases",
-}
+const (
+	helmReleaseGroup    = "helm.toolkit.fluxcd.io"
+	helmReleaseResource = "helmreleases"
+)
 
-// HelmReleaseCRDPresent returns true if helm.toolkit.fluxcd.io/v2 is
-// registered on the cluster's API server. Use to gate watcher
+// helmReleaseCandidateVersions lists HelmRelease API versions in our
+// preferred order. v2 went stable in Flux 2.3 (May 2024); v2beta2 was
+// the default through mid-2023; v2beta1 is older still. The Ready
+// condition shape we map is identical across all three, so picking
+// the newest version the cluster serves is purely a forward-looking
+// preference.
+var helmReleaseCandidateVersions = []string{"v2", "v2beta2", "v2beta1"}
+
+// ResolveHelmReleaseGVR probes the cluster's API server and returns
+// the most-preferred HelmRelease GVR served, or ok=false if none of
+// the candidate versions are registered. Use to gate watcher
 // construction so clusters without Flux installed boot cleanly
 // instead of crashing on a missing CRD.
 //
@@ -45,24 +51,24 @@ var HelmReleaseGVR = schema.GroupVersionResource{
 // list/watch streams must outlive the timeout. ctx is honored even
 // though client-go v0.35's discovery API has no context-accepting
 // variant; the in-flight request is raced against ctx.Done() via a
-// goroutine in helmReleaseCRDPresentVia.
-func HelmReleaseCRDPresent(ctx context.Context, cfg *rest.Config) (bool, error) {
+// goroutine in resolveHelmReleaseGVRVia.
+func ResolveHelmReleaseGVR(ctx context.Context, cfg *rest.Config) (schema.GroupVersionResource, bool, error) {
 	probeCfg := rest.CopyConfig(cfg)
 	probeCfg.Timeout = pingTimeout
 
 	disc, err := discovery.NewDiscoveryClientForConfig(probeCfg)
 	if err != nil {
-		return false, fmt.Errorf("build discovery client: %w", err)
+		return schema.GroupVersionResource{}, false, fmt.Errorf("build discovery client: %w", err)
 	}
-	return helmReleaseCRDPresentVia(ctx, disc)
+	return resolveHelmReleaseGVRVia(ctx, disc)
 }
 
-// helmReleaseCRDPresentVia is the testable seam: it accepts a
+// resolveHelmReleaseGVRVia is the testable seam: it accepts a
 // pre-built ServerGroupsInterface so tests can drive it with a fake
 // without spinning up an HTTP server. The cancellation race against
 // ctx.Done() lives here so the goroutine semantics are exercised by
 // unit tests.
-func helmReleaseCRDPresentVia(ctx context.Context, disc discovery.ServerGroupsInterface) (bool, error) {
+func resolveHelmReleaseGVRVia(ctx context.Context, disc discovery.ServerGroupsInterface) (schema.GroupVersionResource, bool, error) {
 	type result struct {
 		groups *metav1.APIGroupList
 		err    error
@@ -76,25 +82,34 @@ func helmReleaseCRDPresentVia(ctx context.Context, disc discovery.ServerGroupsIn
 	var groups *metav1.APIGroupList
 	select {
 	case <-ctx.Done():
-		return false, fmt.Errorf("helmrelease CRD probe cancelled: %w", ctx.Err())
+		return schema.GroupVersionResource{}, false, fmt.Errorf("helmrelease CRD probe cancelled: %w", ctx.Err())
 	case r := <-resultCh:
 		if r.err != nil {
-			return false, fmt.Errorf("list server groups: %w", r.err)
+			return schema.GroupVersionResource{}, false, fmt.Errorf("list server groups: %w", r.err)
 		}
 		groups = r.groups
 	}
 
+	served := make(map[string]struct{})
 	for _, g := range groups.Groups {
-		if g.Name != HelmReleaseGVR.Group {
+		if g.Name != helmReleaseGroup {
 			continue
 		}
 		for _, v := range g.Versions {
-			if v.Version == HelmReleaseGVR.Version {
-				return true, nil
-			}
+			served[v.Version] = struct{}{}
+		}
+		break
+	}
+	for _, v := range helmReleaseCandidateVersions {
+		if _, ok := served[v]; ok {
+			return schema.GroupVersionResource{
+				Group:    helmReleaseGroup,
+				Version:  v,
+				Resource: helmReleaseResource,
+			}, true, nil
 		}
 	}
-	return false, nil
+	return schema.GroupVersionResource{}, false, nil
 }
 
 // HelmReleaseWatcher watches HelmRelease events for the configured
@@ -113,6 +128,7 @@ type HelmReleaseWatcher struct {
 	logger  *slog.Logger
 	window  time.Duration
 	clk     clock.WithDelayedExecution
+	gvr     schema.GroupVersionResource
 
 	// populated in Start once the informer factory exists
 	lister    cache.GenericLister
@@ -136,6 +152,7 @@ func NewHelmReleaseWatcher(
 	logger *slog.Logger,
 	window time.Duration,
 	clk clock.WithDelayedExecution,
+	gvr schema.GroupVersionResource,
 ) *HelmReleaseWatcher {
 	if logger == nil {
 		logger = slog.Default()
@@ -158,6 +175,7 @@ func NewHelmReleaseWatcher(
 		logger:   logger.With("watcher", "helmrelease"),
 		window:   window,
 		clk:      clk,
+		gvr:      gvr,
 		syncedCh: make(chan struct{}),
 	}
 }
@@ -173,8 +191,8 @@ func (w *HelmReleaseWatcher) Synced() <-chan struct{} {
 func (w *HelmReleaseWatcher) Start(ctx context.Context) error {
 	w.ctx = ctx
 	factory := dynamicinformer.NewDynamicSharedInformerFactory(w.client, 0)
-	informer := factory.ForResource(HelmReleaseGVR).Informer()
-	w.lister = factory.ForResource(HelmReleaseGVR).Lister()
+	informer := factory.ForResource(w.gvr).Informer()
+	w.lister = factory.ForResource(w.gvr).Lister()
 	w.debouncer = status.NewDebouncer(w.window, w.clk, w.retry)
 	defer w.debouncer.Stop()
 
