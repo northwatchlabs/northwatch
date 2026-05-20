@@ -3,8 +3,9 @@
 GO ?= go
 BIN := northwatch
 PKG := ./...
+IMAGE ?= northwatch:dev
 
-.PHONY: help build run test vet lint css clean
+.PHONY: help build run test vet lint css image clean
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z_-]+:.*##/ { printf "  %-10s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -27,6 +28,9 @@ lint: ## Run golangci-lint (must be installed).
 css: ## Compile Tailwind CSS from web/input.css to internal/ui/static/style.css.
 	@command -v tailwindcss >/dev/null 2>&1 || { echo "tailwindcss not found in PATH; install standalone binary or via npm"; exit 1; }
 	tailwindcss -i web/input.css -o internal/ui/static/style.css --minify
+
+image: ## Build the container image (override with IMAGE=name:tag).
+	docker build -f deploy/docker/Dockerfile -t $(IMAGE) .
 
 clean: ## Remove build artifacts.
 	rm -f $(BIN)

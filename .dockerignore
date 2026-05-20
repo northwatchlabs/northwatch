@@ -1,0 +1,36 @@
+# Keep the build context small and reproducible. Anything not needed
+# by `go build ./cmd/northwatch` or the embedded static assets should
+# be excluded.
+
+.git
+.github
+.agents
+.codex
+.claude
+
+# Local build artefacts.
+northwatch
+*.test
+*.out
+coverage.*
+dist/
+
+# Docs and examples — not used at build time.
+docs/
+examples/
+
+# Editor / OS noise.
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Local databases and dev state.
+*.db
+*.sqlite
+*.sqlite3
+
+# Node / Tailwind sources — compiled CSS is committed under
+# internal/ui/static/, so the source isn't needed in the image.
+node_modules/
+web/
