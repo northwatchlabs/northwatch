@@ -49,6 +49,83 @@ func TestMapHelmRelease(t *testing.T) {
 			hr:   newHelmRelease(nil),
 			want: component.StatusUnknown,
 		},
+		{
+			name: "Stalled=True (fresh) overrides Ready=False/BuildFailed → down",
+			hr: helmReleaseWithGeneration(1,
+				condition{condType: "Stalled", status: "True", reason: "RetriesExhausted", observedGen: int64(1)},
+				condition{condType: "Ready", status: "False", reason: "BuildFailed", observedGen: int64(1)},
+			),
+			want: component.StatusDown,
+		},
+		{
+			name: "Reconciling=True (fresh) with Ready=True → operational (routine re-reconcile)",
+			hr: helmReleaseWithGeneration(1,
+				condition{condType: "Reconciling", status: "True", reason: "Progressing", observedGen: int64(1)},
+				condition{condType: "Ready", status: "True", observedGen: int64(1)},
+			),
+			want: component.StatusOperational,
+		},
+		{
+			name: "Reconciling=True (fresh) with Ready=Unknown → degraded",
+			hr: helmReleaseWithGeneration(1,
+				condition{condType: "Reconciling", status: "True", reason: "Progressing", observedGen: int64(1)},
+				condition{condType: "Ready", status: "Unknown", observedGen: int64(1)},
+			),
+			want: component.StatusDegraded,
+		},
+		{
+			name: "Reconciling=True (fresh) with Ready=False/InstallFailed → down (trusted Ready=False/other wins)",
+			hr: helmReleaseWithGeneration(1,
+				condition{condType: "Reconciling", status: "True", reason: "Progressing", observedGen: int64(1)},
+				condition{condType: "Ready", status: "False", reason: "InstallFailed", observedGen: int64(1)},
+			),
+			want: component.StatusDown,
+		},
+		{
+			name: "Stalled=True AND Reconciling=True (both fresh) → down (Stalled wins)",
+			hr: helmReleaseWithGeneration(1,
+				condition{condType: "Stalled", status: "True", reason: "InstallFailed", observedGen: int64(1)},
+				condition{condType: "Reconciling", status: "True", reason: "Progressing", observedGen: int64(1)},
+				condition{condType: "Ready", status: "False", reason: "InstallFailed", observedGen: int64(1)},
+			),
+			want: component.StatusDown,
+		},
+		{
+			name: "Stale Ready (gen=2, observedGen=1) Ready=True → unknown (freshness)",
+			hr: helmReleaseWithGeneration(2,
+				condition{condType: "Ready", status: "True", observedGen: int64(1)},
+			),
+			want: component.StatusUnknown,
+		},
+		{
+			name: "Stale Stalled + stale Ready (gen=2, all observedGen=1) → unknown",
+			hr: helmReleaseWithGeneration(2,
+				condition{condType: "Stalled", status: "True", reason: "InstallFailed", observedGen: int64(1)},
+				condition{condType: "Ready", status: "True", observedGen: int64(1)},
+			),
+			want: component.StatusUnknown,
+		},
+		{
+			name: "Ready missing observedGeneration, gen=1, Ready=True → unknown (stale)",
+			hr: helmReleaseWithGeneration(1,
+				condition{condType: "Ready", status: "True"},
+			),
+			want: component.StatusUnknown,
+		},
+		{
+			name: "observedGeneration as float64, gen=1, Ready=True → operational (tolerant decode)",
+			hr: helmReleaseWithGeneration(1,
+				condition{condType: "Ready", status: "True", observedGen: float64(1)},
+			),
+			want: component.StatusOperational,
+		},
+		{
+			name: "Fresh Stalled=True with Ready missing → down (per-condition freshness)",
+			hr: helmReleaseWithGeneration(1,
+				condition{condType: "Stalled", status: "True", reason: "RetriesExhausted", observedGen: int64(1)},
+			),
+			want: component.StatusDown,
+		},
 	}
 
 	for _, tc := range tests {
@@ -104,6 +181,83 @@ func TestMapKustomization(t *testing.T) {
 			ks:   newKustomization(nil),
 			want: component.StatusUnknown,
 		},
+		{
+			name: "Stalled=True (fresh) overrides Ready=False/BuildFailed → down",
+			ks: kustomizationWithGeneration(1,
+				condition{condType: "Stalled", status: "True", reason: "RetriesExhausted", observedGen: int64(1)},
+				condition{condType: "Ready", status: "False", reason: "BuildFailed", observedGen: int64(1)},
+			),
+			want: component.StatusDown,
+		},
+		{
+			name: "Reconciling=True (fresh) with Ready=True → operational (routine re-reconcile)",
+			ks: kustomizationWithGeneration(1,
+				condition{condType: "Reconciling", status: "True", reason: "Progressing", observedGen: int64(1)},
+				condition{condType: "Ready", status: "True", observedGen: int64(1)},
+			),
+			want: component.StatusOperational,
+		},
+		{
+			name: "Reconciling=True (fresh) with Ready=Unknown → degraded",
+			ks: kustomizationWithGeneration(1,
+				condition{condType: "Reconciling", status: "True", reason: "Progressing", observedGen: int64(1)},
+				condition{condType: "Ready", status: "Unknown", observedGen: int64(1)},
+			),
+			want: component.StatusDegraded,
+		},
+		{
+			name: "Reconciling=True (fresh) with Ready=False/BuildFailed → down (trusted Ready=False/other wins)",
+			ks: kustomizationWithGeneration(1,
+				condition{condType: "Reconciling", status: "True", reason: "Progressing", observedGen: int64(1)},
+				condition{condType: "Ready", status: "False", reason: "BuildFailed", observedGen: int64(1)},
+			),
+			want: component.StatusDown,
+		},
+		{
+			name: "Stalled=True AND Reconciling=True (both fresh) → down (Stalled wins)",
+			ks: kustomizationWithGeneration(1,
+				condition{condType: "Stalled", status: "True", reason: "BuildFailed", observedGen: int64(1)},
+				condition{condType: "Reconciling", status: "True", reason: "Progressing", observedGen: int64(1)},
+				condition{condType: "Ready", status: "False", reason: "BuildFailed", observedGen: int64(1)},
+			),
+			want: component.StatusDown,
+		},
+		{
+			name: "Stale Ready (gen=2, observedGen=1) Ready=True → unknown (freshness)",
+			ks: kustomizationWithGeneration(2,
+				condition{condType: "Ready", status: "True", observedGen: int64(1)},
+			),
+			want: component.StatusUnknown,
+		},
+		{
+			name: "Stale Stalled + stale Ready (gen=2, all observedGen=1) → unknown",
+			ks: kustomizationWithGeneration(2,
+				condition{condType: "Stalled", status: "True", reason: "BuildFailed", observedGen: int64(1)},
+				condition{condType: "Ready", status: "True", observedGen: int64(1)},
+			),
+			want: component.StatusUnknown,
+		},
+		{
+			name: "Ready missing observedGeneration, gen=1, Ready=True → unknown (stale)",
+			ks: kustomizationWithGeneration(1,
+				condition{condType: "Ready", status: "True"},
+			),
+			want: component.StatusUnknown,
+		},
+		{
+			name: "observedGeneration as float64, gen=1, Ready=True → operational (tolerant decode)",
+			ks: kustomizationWithGeneration(1,
+				condition{condType: "Ready", status: "True", observedGen: float64(1)},
+			),
+			want: component.StatusOperational,
+		},
+		{
+			name: "Fresh Stalled=True with Ready missing → down (per-condition freshness)",
+			ks: kustomizationWithGeneration(1,
+				condition{condType: "Stalled", status: "True", reason: "RetriesExhausted", observedGen: int64(1)},
+			),
+			want: component.StatusDown,
+		},
 	}
 
 	for _, tc := range tests {
@@ -116,19 +270,61 @@ func TestMapKustomization(t *testing.T) {
 	}
 }
 
-func kustomizationWithReady(readyStatus, reason string) *unstructured.Unstructured {
-	cond := map[string]interface{}{
-		"type":   "Ready",
-		"status": readyStatus,
+// condition is a tiny test-only shape for building unstructured
+// status.conditions entries. Empty reason is omitted. observedGen is
+// emitted as-is when non-nil — pass int64 or float64 to exercise the
+// mapper's tolerant numeric decoding.
+type condition struct {
+	condType    string
+	status      string
+	reason      string
+	observedGen interface{} // nil omits the field
+}
+
+func conditionsObject(conds ...condition) map[string]interface{} {
+	out := make([]interface{}, 0, len(conds))
+	for _, c := range conds {
+		m := map[string]interface{}{
+			"type":   c.condType,
+			"status": c.status,
+		}
+		if c.reason != "" {
+			m["reason"] = c.reason
+		}
+		if c.observedGen != nil {
+			m["observedGeneration"] = c.observedGen
+		}
+		out = append(out, m)
 	}
-	if reason != "" {
-		cond["reason"] = reason
-	}
-	return newKustomization(map[string]interface{}{
+	return map[string]interface{}{
 		"status": map[string]interface{}{
-			"conditions": []interface{}{cond},
+			"conditions": out,
 		},
-	})
+	}
+}
+
+func helmReleaseWithConditions(conds ...condition) *unstructured.Unstructured {
+	return newHelmRelease(conditionsObject(conds...))
+}
+
+func kustomizationWithConditions(conds ...condition) *unstructured.Unstructured {
+	return newKustomization(conditionsObject(conds...))
+}
+
+func helmReleaseWithGeneration(gen int64, conds ...condition) *unstructured.Unstructured {
+	u := helmReleaseWithConditions(conds...)
+	u.SetGeneration(gen)
+	return u
+}
+
+func kustomizationWithGeneration(gen int64, conds ...condition) *unstructured.Unstructured {
+	u := kustomizationWithConditions(conds...)
+	u.SetGeneration(gen)
+	return u
+}
+
+func kustomizationWithReady(readyStatus, reason string) *unstructured.Unstructured {
+	return kustomizationWithGeneration(1, condition{condType: "Ready", status: readyStatus, reason: reason, observedGen: int64(1)})
 }
 
 func newKustomization(obj map[string]interface{}) *unstructured.Unstructured {
@@ -147,18 +343,7 @@ func newKustomization(obj map[string]interface{}) *unstructured.Unstructured {
 }
 
 func helmReleaseWithReady(readyStatus, reason string) *unstructured.Unstructured {
-	cond := map[string]interface{}{
-		"type":   "Ready",
-		"status": readyStatus,
-	}
-	if reason != "" {
-		cond["reason"] = reason
-	}
-	return newHelmRelease(map[string]interface{}{
-		"status": map[string]interface{}{
-			"conditions": []interface{}{cond},
-		},
-	})
+	return helmReleaseWithGeneration(1, condition{condType: "Ready", status: readyStatus, reason: reason, observedGen: int64(1)})
 }
 
 func newHelmRelease(obj map[string]interface{}) *unstructured.Unstructured {

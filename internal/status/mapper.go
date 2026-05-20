@@ -8,67 +8,121 @@ import (
 	"github.com/northwatchlabs/northwatch/internal/component"
 )
 
-// MapHelmRelease returns the component status for a Flux HelmRelease
-// based on status.conditions[type=Ready].
+// MapHelmRelease returns the component status for a Flux HelmRelease.
+// Honors the kstatus condition triplet (Stalled, Ready, Reconciling)
+// with per-condition observedGeneration freshness. Precedence (first
+// trusted match wins):
 //
-//   - Ready=True                       → operational
-//   - Ready=False, reason=Progressing  → degraded
-//   - Ready=False, other reason        → down
-//   - Ready missing/Unknown            → unknown
+//   - Stalled=True (fresh)                       → down
+//   - Ready=True (fresh)                         → operational
+//   - Ready=False, reason=Progressing (fresh)    → degraded
+//   - Ready=False, other reason (fresh)          → down
+//   - Reconciling=True (fresh)                   → degraded
+//   - otherwise                                  → unknown
+//
+// "Fresh" means observedGeneration == metadata.generation; stale
+// conditions are ignored.
 func MapHelmRelease(u *unstructured.Unstructured) component.Status {
-	return mapReadyCondition(u)
+	return mapFluxConditions(u)
 }
 
 // MapKustomization returns the component status for a Flux
-// Kustomization (kustomize.toolkit.fluxcd.io/v1) based on
-// status.conditions[type=Ready].
+// Kustomization (kustomize.toolkit.fluxcd.io/v1). Honors the kstatus
+// condition triplet (Stalled, Ready, Reconciling) with per-condition
+// observedGeneration freshness. Precedence (first trusted match
+// wins):
 //
-//   - Ready=True                       → operational
-//   - Ready=False, reason=Progressing  → degraded
-//   - Ready=False, other reason        → down
-//   - Ready missing/Unknown            → unknown
+//   - Stalled=True (fresh)                       → down
+//   - Ready=True (fresh)                         → operational
+//   - Ready=False, reason=Progressing (fresh)    → degraded
+//   - Ready=False, other reason (fresh)          → down
+//   - Reconciling=True (fresh)                   → degraded
+//   - otherwise                                  → unknown
 //
-// kustomize-controller also surfaces separate Reconciling and Stalled
-// conditions (kstatus). Inspecting those is tracked separately (#57)
-// and must land symmetrically in MapHelmRelease and MapKustomization.
+// "Fresh" means observedGeneration == metadata.generation; stale
+// conditions are ignored.
 func MapKustomization(u *unstructured.Unstructured) component.Status {
-	return mapReadyCondition(u)
+	return mapFluxConditions(u)
 }
 
-// mapReadyCondition is the shared Ready-condition mapper used by
-// MapHelmRelease and MapKustomization. Both Flux controllers report
-// reconcile state through status.conditions[type=Ready] with the
-// same shape: status ∈ {True,False,Unknown}, reason ∈ {Progressing,
-// <controller-specific failure reasons>...}. Keep the two exported
-// functions as thin delegates so a future kstatus-aware mapper (see
-// #57) can swap the implementation in one place.
-func mapReadyCondition(u *unstructured.Unstructured) component.Status {
-	conds, found, err := unstructured.NestedSlice(u.Object, "status", "conditions")
-	if err != nil || !found {
-		return component.StatusUnknown
+// asInt64 tolerantly decodes a value from an unstructured map. JSON
+// deserialization into unstructured can produce either int64 or
+// float64 for numeric fields depending on the code path, so accept
+// both. Missing or unrecognized types decode as 0.
+func asInt64(v interface{}) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case float64:
+		return int64(x)
+	case int:
+		return int64(x)
 	}
+	return 0
+}
+
+// findCondition returns the status, reason, and observedGeneration of
+// the first entry in status.conditions whose type matches condType.
+// observedGenPresent indicates whether the observedGeneration field
+// was explicitly set on the matched condition — callers must check
+// this to avoid treating a missing field's zero value as a legitimate
+// generation. Returns ("", "", 0, false, false) if no matching entry
+// is present or the slice is malformed.
+func findCondition(conds []interface{}, condType string) (status, reason string, observedGen int64, observedGenPresent bool, found bool) {
 	for _, c := range conds {
 		m, ok := c.(map[string]interface{})
 		if !ok {
 			continue
 		}
-		if t, _ := m["type"].(string); t != "Ready" {
+		t, _ := m["type"].(string)
+		if t != condType {
 			continue
 		}
 		s, _ := m["status"].(string)
-		switch s {
+		r, _ := m["reason"].(string)
+		ogv, ogPresent := m["observedGeneration"]
+		og := asInt64(ogv)
+		return s, r, og, ogPresent, true
+	}
+	return "", "", 0, false, false
+}
+
+// mapFluxConditions is the shared kstatus-aware mapper used by
+// MapHelmRelease and MapKustomization. Each of Stalled, Ready, and
+// Reconciling is checked for freshness independently — a condition
+// is trusted iff its observedGeneration matches the resource's
+// metadata.generation. Stale conditions are ignored as if absent.
+// See MapHelmRelease for the full precedence table.
+func mapFluxConditions(u *unstructured.Unstructured) component.Status {
+	conds, found, err := unstructured.NestedSlice(u.Object, "status", "conditions")
+	if err != nil || !found {
+		return component.StatusUnknown
+	}
+
+	gen := u.GetGeneration()
+
+	if s, _, og, ogP, ok := findCondition(conds, "Stalled"); ok && ogP && og == gen && s == "True" {
+		return component.StatusDown
+	}
+
+	readyStatus, readyReason, readyOG, readyOGP, hasReady := findCondition(conds, "Ready")
+	if hasReady && readyOGP && readyOG == gen {
+		switch readyStatus {
 		case "True":
 			return component.StatusOperational
 		case "False":
-			reason, _ := m["reason"].(string)
-			if reason == "Progressing" {
+			if readyReason == "Progressing" {
 				return component.StatusDegraded
 			}
 			return component.StatusDown
-		default:
-			return component.StatusUnknown
 		}
+		// Ready=Unknown or unrecognized: fall through to Reconciling.
 	}
+
+	if s, _, og, ogP, ok := findCondition(conds, "Reconciling"); ok && ogP && og == gen && s == "True" {
+		return component.StatusDegraded
+	}
+
 	return component.StatusUnknown
 }
 
