@@ -11,3 +11,7 @@ components:
     namespace: argocd
     name: payments
     displayName: "Payments Service"
+  - kind: Kustomization
+    namespace: flux-system
+    name: infra
+    displayName: "Infra (Flux Kustomization)"

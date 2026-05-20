@@ -16,6 +16,33 @@ import (
 //   - Ready=False, other reason        → down
 //   - Ready missing/Unknown            → unknown
 func MapHelmRelease(u *unstructured.Unstructured) component.Status {
+	return mapReadyCondition(u)
+}
+
+// MapKustomization returns the component status for a Flux
+// Kustomization (kustomize.toolkit.fluxcd.io/v1) based on
+// status.conditions[type=Ready].
+//
+//   - Ready=True                       → operational
+//   - Ready=False, reason=Progressing  → degraded
+//   - Ready=False, other reason        → down
+//   - Ready missing/Unknown            → unknown
+//
+// kustomize-controller also surfaces separate Reconciling and Stalled
+// conditions (kstatus). Inspecting those is tracked separately (#57)
+// and must land symmetrically in MapHelmRelease and MapKustomization.
+func MapKustomization(u *unstructured.Unstructured) component.Status {
+	return mapReadyCondition(u)
+}
+
+// mapReadyCondition is the shared Ready-condition mapper used by
+// MapHelmRelease and MapKustomization. Both Flux controllers report
+// reconcile state through status.conditions[type=Ready] with the
+// same shape: status ∈ {True,False,Unknown}, reason ∈ {Progressing,
+// <controller-specific failure reasons>...}. Keep the two exported
+// functions as thin delegates so a future kstatus-aware mapper (see
+// #57) can swap the implementation in one place.
+func mapReadyCondition(u *unstructured.Unstructured) component.Status {
 	conds, found, err := unstructured.NestedSlice(u.Object, "status", "conditions")
 	if err != nil || !found {
 		return component.StatusUnknown

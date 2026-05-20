@@ -51,10 +51,13 @@ kubectl --context kind-nw-demo -n default scale deploy/api-gateway --replicas=3
 ```
 
 The component config (`examples/basic/northwatch.yaml`) also lists
-`HelmRelease/flux-system/cert-manager` and an ArgoCD `Application`,
-which will show as `unknown` until those controllers are installed.
-The CRD probe logs `"Flux CRDs not present, skipping helmrelease
-watcher"` and continues — that's expected.
+`HelmRelease/flux-system/cert-manager`, an ArgoCD `Application`, and
+a Flux `Kustomization`, which will show as `unknown` until those
+controllers are installed. The CRD probes log
+`"Flux HelmRelease CRDs not present, skipping helmrelease watcher"`
+(and the parallel `"ArgoCD CRDs not present, skipping application
+watcher"` / `"Flux Kustomize CRDs not present, skipping kustomization
+watcher"`) and continue — that's expected.
 
 ### 3. (Optional) Watch a HelmRelease
 
@@ -95,6 +98,48 @@ non-existent version:
 ```sh
 kubectl --context kind-nw-demo -n default patch hr podinfo \
     --type merge -p '{"spec":{"chart":{"spec":{"version":"999.0.0"}}}}'
+```
+
+### 4. (Optional) Watch a Flux Kustomization
+
+To exercise the Kustomization watcher, install Flux's source and
+kustomize controllers and apply a real Kustomization. The recipe
+below uses `stefanprodan/podinfo` because it ships a ready-to-use
+`/kustomize/` path — no scratch repo needed:
+
+```sh
+flux --context kind-nw-demo install \
+    --components=source-controller,kustomize-controller
+
+bash -c "kubectl --context kind-nw-demo apply -f - <<'EOF'
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata: { name: podinfo, namespace: default }
+spec:
+  interval: 5m
+  url: https://github.com/stefanprodan/podinfo
+  ref: { branch: master }
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata: { name: podinfo, namespace: default }
+spec:
+  interval: 5m
+  path: ./kustomize
+  prune: true
+  sourceRef: { kind: GitRepository, name: podinfo }
+  targetNamespace: default
+EOF
+"
+```
+
+Point a config entry at `Kustomization/default/podinfo`, restart
+`northwatch`, and the Kustomization renders as `operational` once
+Flux reconciles it. To watch it flip to `down`, break the path:
+
+```sh
+kubectl --context kind-nw-demo -n default patch ks podinfo \
+    --type merge -p '{"spec":{"path":"./does-not-exist"}}'
 ```
 
 ### Cleanup
