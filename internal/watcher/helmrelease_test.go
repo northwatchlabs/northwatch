@@ -45,12 +45,14 @@ func newHelmRelease(ns, name, readyStatus, readyReason string) *unstructured.Uns
 	u.SetGroupVersionKind(helmReleaseV2GVR.GroupVersion().WithKind("HelmRelease"))
 	u.SetNamespace(ns)
 	u.SetName(name)
+	u.SetGeneration(1)
 	if readyStatus != "" {
 		conds := []interface{}{
 			map[string]interface{}{
-				"type":   "Ready",
-				"status": readyStatus,
-				"reason": readyReason,
+				"type":               "Ready",
+				"status":             readyStatus,
+				"reason":             readyReason,
+				"observedGeneration": int64(1),
 			},
 		}
 		_ = unstructured.SetNestedSlice(u.Object, conds, "status", "conditions")
@@ -117,7 +119,7 @@ func TestHelmReleaseWatcher_ReadyTransitions(t *testing.T) {
 		t.Fatalf("get: %v", err)
 	}
 	_ = unstructured.SetNestedSlice(cur.Object, []interface{}{
-		map[string]interface{}{"type": "Ready", "status": "False", "reason": "Progressing"},
+		map[string]interface{}{"type": "Ready", "status": "False", "reason": "Progressing", "observedGeneration": int64(1)},
 	}, "status", "conditions")
 	if _, err := res.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("update degraded: %v", err)
@@ -130,7 +132,7 @@ func TestHelmReleaseWatcher_ReadyTransitions(t *testing.T) {
 	// down: Ready=False, reason=InstallFailed
 	cur, _ = res.Get(ctx, "my-app", metav1.GetOptions{})
 	_ = unstructured.SetNestedSlice(cur.Object, []interface{}{
-		map[string]interface{}{"type": "Ready", "status": "False", "reason": "InstallFailed"},
+		map[string]interface{}{"type": "Ready", "status": "False", "reason": "InstallFailed", "observedGeneration": int64(1)},
 	}, "status", "conditions")
 	if _, err := res.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("update down: %v", err)
@@ -143,7 +145,7 @@ func TestHelmReleaseWatcher_ReadyTransitions(t *testing.T) {
 	// operational again: Ready=True
 	cur, _ = res.Get(ctx, "my-app", metav1.GetOptions{})
 	_ = unstructured.SetNestedSlice(cur.Object, []interface{}{
-		map[string]interface{}{"type": "Ready", "status": "True", "reason": "ReconciliationSucceeded"},
+		map[string]interface{}{"type": "Ready", "status": "True", "reason": "ReconciliationSucceeded", "observedGeneration": int64(1)},
 	}, "status", "conditions")
 	if _, err := res.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("update operational: %v", err)
@@ -204,7 +206,7 @@ func TestHelmReleaseWatcher_StatusUnchangedNoOp(t *testing.T) {
 	// so this should not produce a second upsert.
 	cur, _ := res.Get(ctx, "my-app", metav1.GetOptions{})
 	_ = unstructured.SetNestedSlice(cur.Object, []interface{}{
-		map[string]interface{}{"type": "Ready", "status": "True", "reason": "ReconciliationSucceeded"},
+		map[string]interface{}{"type": "Ready", "status": "True", "reason": "ReconciliationSucceeded", "observedGeneration": int64(1)},
 	}, "status", "conditions")
 	if _, err := res.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("update same: %v", err)
@@ -214,7 +216,7 @@ func TestHelmReleaseWatcher_StatusUnchangedNoOp(t *testing.T) {
 	// Real change → upsert.
 	cur, _ = res.Get(ctx, "my-app", metav1.GetOptions{})
 	_ = unstructured.SetNestedSlice(cur.Object, []interface{}{
-		map[string]interface{}{"type": "Ready", "status": "False", "reason": "InstallFailed"},
+		map[string]interface{}{"type": "Ready", "status": "False", "reason": "InstallFailed", "observedGeneration": int64(1)},
 	}, "status", "conditions")
 	if _, err := res.Update(ctx, cur, metav1.UpdateOptions{}); err != nil {
 		t.Fatalf("update changed: %v", err)
