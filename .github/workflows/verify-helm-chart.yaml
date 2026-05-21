@@ -1,0 +1,139 @@
+name: Verify Helm chart
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'deploy/helm/**'
+      - 'deploy/docker/**'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'examples/basic/sample-deployment.yaml'
+      - '.github/workflows/verify-helm-chart.yaml'
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Lint and smoke (helm ${{ matrix.helm }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        helm: ["3.21.0", "4.2.0"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Helm
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2  # v5.0.0
+        with:
+          version: ${{ matrix.helm }}
+
+      - name: Lint chart
+        run: helm lint deploy/helm/northwatch
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a  # v4.0.0
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
+
+      - name: Resolve chart appVersion
+        id: appver
+        run: |
+          set -euo pipefail
+          v=$(helm show chart deploy/helm/northwatch \
+            | awk '/^appVersion:/ {gsub(/"/, "", $2); print $2; exit}')
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Build NorthWatch image (tag = chart appVersion)
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: ghcr.io/northwatchlabs/northwatch:${{ steps.appver.outputs.value }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc  # v1.14.0
+        with:
+          cluster_name: northwatch-smoke
+          wait: 60s
+
+      - name: Load image into kind
+        run: |
+          kind load docker-image \
+            "ghcr.io/northwatchlabs/northwatch:${{ steps.appver.outputs.value }}" \
+            --name northwatch-smoke
+
+      - name: Smoke (apply workload + install chart + assert)
+        # helm/kind-action above already created the cluster, so the
+        # logic from deploy/helm/scripts/smoke.sh is inlined here
+        # (skipping the kind create / delete steps the script does).
+        run: |
+          set -euo pipefail
+          NAMESPACE=northwatch
+          RELEASE=nw
+
+          kubectl apply -f examples/basic/sample-deployment.yaml
+          kubectl create namespace "$NAMESPACE" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          helm install "$RELEASE" deploy/helm/northwatch \
+            --namespace "$NAMESPACE" \
+            --values deploy/helm/ci/smoke-values.yaml \
+            --wait --timeout 120s
+
+          kubectl -n "$NAMESPACE" wait deploy/"${RELEASE}-northwatch" \
+            --for=condition=available --timeout=60s
+          kubectl wait deploy/api-gateway \
+            --for=condition=available --timeout=60s
+
+          kubectl -n "$NAMESPACE" port-forward \
+            "svc/${RELEASE}-northwatch" 18080:8080 >/dev/null 2>&1 &
+          pf_pid=$!
+          trap 'kill $pf_pid 2>/dev/null || true' EXIT
+
+          for _ in 1 2 3 4 5; do
+            sleep 1
+            if curl -fsS http://localhost:18080/healthz >/dev/null 2>&1; then
+              break
+            fi
+          done
+          curl -fsS http://localhost:18080/healthz
+
+          deadline=$(( $(date +%s) + 60 ))
+          while :; do
+            if curl -fsS http://localhost:18080/api/components \
+              | jq -e '.[] | select(.name=="api-gateway" and .status=="operational")' \
+              >/dev/null; then
+              echo "api-gateway operational"
+              break
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "timed out waiting for api-gateway operational" >&2
+              curl -fsS http://localhost:18080/api/components || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+          # --wait blocks until cluster-scoped RBAC is actually gone,
+          # not just marked for deletion — otherwise the gets below race.
+          helm uninstall "$RELEASE" --namespace "$NAMESPACE" --wait --timeout 60s
+
+          if kubectl get clusterrole "${RELEASE}-northwatch" >/dev/null 2>&1; then
+            echo "ClusterRole survived uninstall" >&2
+            exit 1
+          fi
+          if kubectl get clusterrolebinding "${RELEASE}-northwatch" >/dev/null 2>&1; then
+            echo "ClusterRoleBinding survived uninstall" >&2
+            exit 1
+          fi

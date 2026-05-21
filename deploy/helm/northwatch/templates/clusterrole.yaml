@@ -1,0 +1,27 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "northwatch.fullname" . }}
+  labels:
+    {{- include "northwatch.labels" . | nindent 4 }}
+rules:
+  # Core workload kind shipped in v0.1 — Deployment.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+  # Flux HelmRelease (helm-controller). Rule renders even when the CRD
+  # is absent — Kubernetes accepts ClusterRole rules whose APIGroup
+  # has no installed CRD.
+  - apiGroups: ["helm.toolkit.fluxcd.io"]
+    resources: ["helmreleases"]
+    verbs: ["get", "list", "watch"]
+  # Flux Kustomization (kustomize-controller).
+  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
+    resources: ["kustomizations"]
+    verbs: ["get", "list", "watch"]
+  # ArgoCD Application.
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["get", "list", "watch"]
+{{- end -}}

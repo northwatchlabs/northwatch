@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "northwatch.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "northwatch.labels" . | nindent 4 }}
+data:
+  northwatch.yaml: |-
+{{ .Values.config | indent 4 }}
