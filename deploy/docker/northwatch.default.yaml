@@ -1,0 +1,9 @@
+# Default NorthWatch config baked into the container image at
+# /etc/northwatch/northwatch.yaml. It exists so `docker run <image>`
+# starts cleanly out of the box. Replace it by mounting your own
+# YAML at the same path, or by overriding --config / NORTHWATCH_CONFIG.
+components:
+  - kind: Deployment
+    namespace: default
+    name: example
+    displayName: "Example Component (replace me)"
