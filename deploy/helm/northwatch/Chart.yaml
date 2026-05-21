@@ -1,0 +1,18 @@
+apiVersion: v2
+name: northwatch
+description: Status page that watches Kubernetes workloads (Deployment, HelmRelease, Flux Kustomization, Argo Application) and surfaces incidents via a public read-only page.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.28.0-0"
+home: https://github.com/northwatchlabs/northwatch
+sources:
+  - https://github.com/northwatchlabs/northwatch
+maintainers:
+  - name: NorthWatch Labs
+    url: https://github.com/northwatchlabs
+keywords:
+  - status-page
+  - kubernetes
+  - flux
+  - argocd

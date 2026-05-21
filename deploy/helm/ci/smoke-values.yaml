@@ -1,0 +1,12 @@
+# Fixture used by deploy/helm/scripts/smoke.sh. ONLY overrides the
+# component config — image.repository / image.tag stay on chart
+# defaults so the smoke run exercises the same install command an
+# end user would type.
+#
+# Matches examples/basic/sample-deployment.yaml.
+config: |
+  components:
+    - kind: Deployment
+      namespace: default
+      name: api-gateway
+      displayName: "API Gateway (smoke)"

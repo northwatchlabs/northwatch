@@ -1,0 +1,21 @@
+NorthWatch is installed.
+
+1. Port-forward to reach the status page:
+
+   kubectl --namespace {{ .Release.Namespace }} port-forward \
+     svc/{{ include "northwatch.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+
+   Then open http://localhost:{{ .Values.service.port }}/
+
+2. The API write endpoints (POST /incidents, POST /incidents/:id/resolve)
+   require a bearer token. Retrieve the API token from the Secret:
+
+   kubectl --namespace {{ .Release.Namespace }} get secret \
+     {{ include "northwatch.tokenSecretName" . }} \
+     -o jsonpath="{.data['{{ include "northwatch.tokenSecretKey" . }}']}" | base64 -d
+
+   Use it as `Authorization: Bearer <token>` against the API.
+
+3. The default install uses an emptyDir for the SQLite database, so
+   incidents and component history are lost when the pod restarts.
+   PVC support is planned for v0.2.
