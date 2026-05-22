@@ -5,7 +5,7 @@ BIN := northwatch
 PKG := ./...
 IMAGE ?= northwatch:dev
 
-.PHONY: help build run test vet lint css image clean helm-lint helm-smoke helm-smoke-v3
+.PHONY: help build run test vet lint css image clean helm-lint helm-smoke helm-smoke-v3 e2e
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n"} /^[a-zA-Z0-9_-]+:.*##/ { printf "  %-14s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -61,3 +61,24 @@ helm-smoke-v3: ## Run the chart smoke test against Helm 3.21.0 (downloaded into 
 	helm3="$$tmp/$${os}-$${arch}/helm"; \
 	"$$helm3" version --short; \
 	HELM="$$helm3" KIND_CLUSTER=northwatch-smoke-v3 bash deploy/helm/scripts/smoke.sh
+
+e2e: ## Run the killer-demo e2e: kind up, build/load image, run go test, kind down.
+	@set -eu; \
+	cluster="northwatch-e2e"; \
+	cleanup() { \
+	  [ -n "$${E2E_KEEP_CLUSTER:-}" ] && return 0; \
+	  kind delete cluster --name "$$cluster" >/dev/null 2>&1 || true; \
+	}; \
+	trap cleanup EXIT; \
+	trap 'trap - EXIT INT TERM; cleanup; exit 130' INT; \
+	trap 'trap - EXIT INT TERM; cleanup; exit 143' TERM; \
+	app_version=$$(helm show chart deploy/helm/northwatch \
+	  | awk '/^appVersion:/ {gsub(/"/, "", $$2); print $$2; exit}'); \
+	image="ghcr.io/northwatchlabs/northwatch:$$app_version"; \
+	echo "==> appVersion=$$app_version image=$$image cluster=$$cluster"; \
+	if ! kind get clusters | grep -qx "$$cluster"; then \
+	  kind create cluster --name "$$cluster" --wait 60s; \
+	fi; \
+	docker build -f deploy/docker/Dockerfile -t "$$image" .; \
+	kind load docker-image "$$image" --name "$$cluster"; \
+	E2E_CLUSTER="$$cluster" $(GO) test -tags=e2e -count=1 -timeout 10m -v ./test/e2e/...
