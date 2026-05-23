@@ -20,8 +20,10 @@ import (
 //   - Reconciling=True (fresh)                   → degraded
 //   - otherwise                                  → unknown
 //
-// "Fresh" means observedGeneration == metadata.generation; stale
-// conditions are ignored.
+// A condition is trusted ("fresh") when its observedGeneration is
+// absent, or present and ≥ metadata.generation — see
+// findFreshCondition for the full rule. Stale conditions are
+// ignored.
 func MapHelmRelease(u *unstructured.Unstructured) component.Status {
 	return mapFluxConditions(u)
 }
@@ -39,8 +41,10 @@ func MapHelmRelease(u *unstructured.Unstructured) component.Status {
 //   - Reconciling=True (fresh)                   → degraded
 //   - otherwise                                  → unknown
 //
-// "Fresh" means observedGeneration == metadata.generation; stale
-// conditions are ignored.
+// A condition is trusted ("fresh") when its observedGeneration is
+// absent, or present and ≥ metadata.generation — see
+// findFreshCondition for the full rule. Stale conditions are
+// ignored.
 func MapKustomization(u *unstructured.Unstructured) component.Status {
 	return mapFluxConditions(u)
 }
@@ -61,14 +65,26 @@ func asInt64(v interface{}) int64 {
 	return 0
 }
 
-// findCondition returns the status, reason, and observedGeneration of
-// the first entry in status.conditions whose type matches condType.
-// observedGenPresent indicates whether the observedGeneration field
-// was explicitly set on the matched condition — callers must check
-// this to avoid treating a missing field's zero value as a legitimate
-// generation. Returns ("", "", 0, false, false) if no matching entry
-// is present or the slice is malformed.
-func findCondition(conds []interface{}, condType string) (status, reason string, observedGen int64, observedGenPresent bool, found bool) {
+// findFreshCondition scans status.conditions for the most-current
+// entry whose type matches condType. A condition is "fresh" when
+// either:
+//
+//   - observedGeneration is absent from the condition — older Flux
+//     v2beta1 (and similar controllers that don't stamp generation
+//     onto conditions) work this way. Trust whatever value the
+//     controller most recently wrote rather than silently dropping
+//     the signal.
+//   - observedGeneration is present and ≥ metadata.generation.
+//
+// When multiple matches are present (rare; CRDs don't enforce
+// uniqueness of condition type), the entry with the highest
+// observedGeneration wins. Entries without observedGeneration
+// compare as 0, so any explicitly-stamped fresh entry beats an
+// untracked duplicate.
+//
+// Returns ("", "", false) if no trusted entry is found.
+func findFreshCondition(conds []interface{}, condType string, gen int64) (status, reason string, found bool) {
+	bestOG := int64(-1)
 	for _, c := range conds {
 		m, ok := c.(map[string]interface{})
 		if !ok {
@@ -78,21 +94,31 @@ func findCondition(conds []interface{}, condType string) (status, reason string,
 		if t != condType {
 			continue
 		}
-		s, _ := m["status"].(string)
-		r, _ := m["reason"].(string)
 		ogv, ogPresent := m["observedGeneration"]
 		og := asInt64(ogv)
-		return s, r, og, ogPresent, true
+		if ogPresent && og < gen {
+			continue
+		}
+		candidate := og
+		if !ogPresent {
+			candidate = 0
+		}
+		if candidate < bestOG {
+			continue
+		}
+		s, _ := m["status"].(string)
+		r, _ := m["reason"].(string)
+		status, reason, found = s, r, true
+		bestOG = candidate
 	}
-	return "", "", 0, false, false
+	return status, reason, found
 }
 
 // mapFluxConditions is the shared kstatus-aware mapper used by
 // MapHelmRelease and MapKustomization. Each of Stalled, Ready, and
-// Reconciling is checked for freshness independently — a condition
-// is trusted iff its observedGeneration matches the resource's
-// metadata.generation. Stale conditions are ignored as if absent.
-// See MapHelmRelease for the full precedence table.
+// Reconciling is checked for freshness independently via
+// findFreshCondition. See MapHelmRelease for the full precedence
+// table.
 func mapFluxConditions(u *unstructured.Unstructured) component.Status {
 	conds, found, err := unstructured.NestedSlice(u.Object, "status", "conditions")
 	if err != nil || !found {
@@ -101,12 +127,12 @@ func mapFluxConditions(u *unstructured.Unstructured) component.Status {
 
 	gen := u.GetGeneration()
 
-	if s, _, og, ogP, ok := findCondition(conds, "Stalled"); ok && ogP && og == gen && s == "True" {
+	if s, _, ok := findFreshCondition(conds, "Stalled", gen); ok && s == "True" {
 		return component.StatusDown
 	}
 
-	readyStatus, readyReason, readyOG, readyOGP, hasReady := findCondition(conds, "Ready")
-	if hasReady && readyOGP && readyOG == gen {
+	readyStatus, readyReason, hasReady := findFreshCondition(conds, "Ready", gen)
+	if hasReady {
 		switch readyStatus {
 		case "True":
 			return component.StatusOperational
@@ -119,7 +145,7 @@ func mapFluxConditions(u *unstructured.Unstructured) component.Status {
 		// Ready=Unknown or unrecognized: fall through to Reconciling.
 	}
 
-	if s, _, og, ogP, ok := findCondition(conds, "Reconciling"); ok && ogP && og == gen && s == "True" {
+	if s, _, ok := findFreshCondition(conds, "Reconciling", gen); ok && s == "True" {
 		return component.StatusDegraded
 	}
 
