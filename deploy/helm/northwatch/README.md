@@ -34,7 +34,7 @@ This chart targets the **Helm 3 + Helm 4 common feature set**. CI runs
 | `rbac.create` | `true` | ClusterRole grants `get,list,watch` on Deployments, HelmReleases, Kustomizations, Applications. |
 | `auth.existingSecret` | `""` | If set, references a pre-existing Secret holding the API token. |
 | `auth.existingSecretKey` | `token` | Key inside `existingSecret`. |
-| `auth.token` | `""` | Literal token written into a chart-managed Secret. |
+| `auth.token` | `""` | Literal token written into a chart-managed Secret. Must be empty or at least 16 characters — shorter values fail schema validation. |
 | `service.port` | `8080` | ClusterIP only; wire your own Ingress. |
 | `resources.requests` | `50m` CPU / `64Mi` mem | Override per environment. |
 | `resources.limits` | `500m` CPU / `256Mi` mem | |

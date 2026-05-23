@@ -33,7 +33,14 @@
       "properties": {
         "existingSecret":    { "type": "string" },
         "existingSecretKey": { "type": "string" },
-        "token":             { "type": "string" }
+        "token": {
+          "type": "string",
+          "anyOf": [
+            { "maxLength": 0 },
+            { "minLength": 16 }
+          ],
+          "description": "Literal API token. Must be empty (chart auto-generates) or at least 16 characters — the binary refuses to start with a shorter token."
+        }
       }
     },
     "service": {
