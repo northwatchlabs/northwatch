@@ -9,6 +9,14 @@ Closes # or Part of #
 <!-- How this was / will be verified. Include pre-merge and post-merge checks (e.g. smoke test in target env, dashboard check) when applicable. -->
 - [ ]
 
+## Breaking changes
+<!-- Tick the box if this PR introduces any breaking change. If yes,
+describe the break and any migration steps. Examples: removed or
+renamed public API or CLI flag, changed default behavior, changed
+config or HelmRelease values shape, dropped support for an OS or
+version. -->
+- [ ] This PR introduces a breaking change
+
 ## PR Checklist
 - [ ] Branch rebased on latest `origin/main` with commits squashed
 - [ ] Issue, if exists, is linked
