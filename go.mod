@@ -3,7 +3,7 @@ module github.com/northwatchlabs/northwatch
 go 1.26.0
 
 require (
-	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-chi/chi/v5 v5.3.0
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/oklog/ulid/v2 v2.1.1
 	gopkg.in/yaml.v3 v3.0.1
@@ -11,7 +11,7 @@ require (
 	k8s.io/apimachinery v0.36.1
 	k8s.io/client-go v0.36.1
 	k8s.io/utils v0.0.0-20260210185600-b8788abfbbc2
-	modernc.org/sqlite v1.50.1
+	modernc.org/sqlite v1.51.0
 )
 
 require (
