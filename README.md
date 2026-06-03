@@ -209,7 +209,7 @@ The roadmap for v0.2.0+ (Postgres, external HTTP monitors,
 notifications, CLI, OCI-published chart) lives in the
 [GitHub milestones](https://github.com/northwatchlabs/northwatch/milestones).
 
-See [`docs/conventions.md`](docs/conventions.md) for the foundational
+See [`docs/development/conventions.md`](docs/development/conventions.md) for the foundational
 naming decisions (Go module path, container registry, Helm OCI path)
 that downstream tooling depends on.
 

@@ -11,6 +11,10 @@ docs/superpowers/
 .codex
 AGENTS.*
 
+# Docs build artifacts
+.venv-docs/
+/site/
+
 # Go build artifacts
 /northwatch
 *.exe

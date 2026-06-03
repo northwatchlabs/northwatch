@@ -1,0 +1,59 @@
+name: Verify docs
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  detect-changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      docs: ${{ steps.filter.outputs.docs }}
+    steps:
+      - name: Checkout
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Filter changed paths
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4.0.1
+        with:
+          filters: |
+            docs:
+              - 'docs/**'
+              - 'mkdocs.yml'
+              - 'mise.toml'
+              - '.github/workflows/verify-docs.yaml'
+
+  build:
+    name: Build docs (strict)
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip docs build
+        if: needs.detect-changes.outputs.docs != 'true' && github.event_name != 'merge_group'
+        run: echo "No docs changes"
+
+      - name: Checkout
+        if: needs.detect-changes.outputs.docs == 'true' || github.event_name == 'merge_group'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up mise
+        if: needs.detect-changes.outputs.docs == 'true' || github.event_name == 'merge_group'
+        uses: jdx/mise-action@c37c93293d6b742fc901e1406b8f764f6fb19dac  # v2
+        with:
+          version: 2026.5.6
+          install: true
+          cache: true
+
+      - name: Build site with strict mode
+        if: needs.detect-changes.outputs.docs == 'true' || github.event_name == 'merge_group'
+        run: mise run docs-build

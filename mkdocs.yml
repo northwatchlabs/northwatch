@@ -1,0 +1,46 @@
+site_name: NorthWatch
+site_description: Production-readiness dashboard for Kubernetes
+site_url: https://northwatchlabs.github.io/northwatch/
+repo_url: https://github.com/northwatchlabs/northwatch
+repo_name: northwatchlabs/northwatch
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+
+nav:
+  - Home: index.md
+  - Architecture: architecture/index.md
+  - Development:
+      - development/index.md
+      - Conventions: development/conventions.md

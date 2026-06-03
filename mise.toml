@@ -1,5 +1,6 @@
 [tools]
 go = "1.26.3"
+python = "3.13.13"
 golangci-lint = "2.12.2"
 "aqua:tailwindlabs/tailwindcss" = "4.3.0"
 "aqua:kubernetes-sigs/kind"     = "0.31.0"
@@ -8,3 +9,21 @@ golangci-lint = "2.12.2"
 "aqua:fluxcd/flux2"             = "2.8.7"
 "aqua:helm/helm"                = "4.2.0"
 "aqua:goreleaser/goreleaser"    = "2.15.4"
+
+[env]
+_.python.venv = { path = ".venv-docs", create = true }
+
+[tasks.docs-install]
+run = "python -m ensurepip --upgrade && python -m pip install -r docs/requirements.txt"
+
+[tasks.docs-build]
+depends = ["docs-install"]
+run = "mkdocs build --strict"
+
+[tasks.docs-serve]
+depends = ["docs-install"]
+run = "mkdocs serve"
+
+[tasks.docs-deploy]
+depends = ["docs-install"]
+run = "mkdocs gh-deploy --force --no-history"
