@@ -40,7 +40,14 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Architecture: architecture/index.md
+  - Architecture:
+      - architecture/index.md
+      - Overview: architecture/overview.md
+      - Status Derivation: architecture/status-derivation.md
+      - Data Model: architecture/data-model.md
+      - GitOps Model: architecture/gitops.md
   - Development:
       - development/index.md
+      - Local Setup: development/local-setup.md
+      - Release Process: development/release-process.md
       - Conventions: development/conventions.md

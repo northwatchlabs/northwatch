@@ -1,3 +1,11 @@
 # Development
 
-Coming soon - tracked in #54.
+NorthWatch uses `mise` to pin development tools. Start with
+[Local setup](local-setup.md), then use the project `Makefile` for the
+common Go, CSS, image, Helm, and e2e loops.
+
+Development references:
+
+- [Local setup](local-setup.md)
+- [Release process](release-process.md)
+- [Project conventions](conventions.md)
