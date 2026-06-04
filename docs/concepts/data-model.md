@@ -104,12 +104,12 @@ table exists now so migrations can evolve safely, but current v0.1
 watcher writes do not populate it. Issue #74 tracks populating this
 table on component state transitions.
 
-## Persistence contracts
+## Persistence behavior
 
-The `store.Store` interface is the boundary for persistence. New code
-should depend on that interface unless it is inside the SQLite
-implementation or a migration test.
+SQLite is the only supported database in v0.1. The binary default path
+is `./northwatch.db`; the container image defaults to
+`/var/lib/northwatch/northwatch.db`.
 
-SQLite migrations are embedded from `internal/store/migrations`.
-`northwatch serve` applies them on startup. `northwatch migrate` applies
-them and exits.
+`northwatch serve` applies migrations on startup. `northwatch migrate`
+applies pending migrations and exits, which is useful when an operator
+wants to run database migration separately from serving traffic.

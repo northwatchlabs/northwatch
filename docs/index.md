@@ -5,24 +5,28 @@ workloads. It reads a small YAML config, watches the matching cluster
 resources, derives component health from resource status, and renders a
 public status page with incident banners.
 
-This documentation is for contributors working on NorthWatch itself.
-It explains the current architecture, the status-derivation path, the
-data model, the GitOps contract, and the local development loop.
+This documentation is for people installing, configuring, running, and
+operating NorthWatch. It covers the user-facing behavior of the product:
+what NorthWatch watches, how it maps Kubernetes state into status page
+health, how to configure the binary or Helm chart, and how to operate the
+incident workflow.
+
+Contributors should start in [Contributing](contributing/index.md).
 
 ## Start here
 
-- [Architecture overview](architecture/overview.md) explains the main
-  packages and runtime process.
-- [Status derivation](architecture/status-derivation.md) explains how
-  Kubernetes and GitOps resource status becomes component health.
-- [Data model](architecture/data-model.md) explains the SQLite tables
-  and domain objects.
-- [GitOps model](architecture/gitops.md) explains how `northwatch.yaml`
-  is reconciled.
-- [Local setup](development/local-setup.md) covers tool bootstrap and
-  common development commands.
-- [Release process](development/release-process.md) summarizes CI,
-  images, binaries, Helm, and docs publishing.
+- [Getting Started](getting-started.md) walks through a local demo with
+  kind and the in-tree Helm chart.
+- [Installation](installation.md) covers the Helm chart and binary run
+  modes.
+- [Configuration](configuration.md) explains `northwatch.yaml`, runtime
+  flags, environment variables, and the incident API token.
+- [Operations](operations.md) covers day-to-day checks, status behavior,
+  incident writes, and safe config changes.
+- [Concepts](concepts/index.md) explains the runtime model, status
+  derivation, data model, and GitOps contract.
+- [Reference](reference.md) lists the current CLI flags, environment
+  variables, HTTP routes, and supported component kinds.
 
 ## Current product scope
 
@@ -39,5 +43,4 @@ NorthWatch v0.1 ships:
 
 Postgres, external monitors, notification channels, a separate CLI,
 subscribers, NorthWatch-owned CRDs, and operator-managed resources are
-later roadmap items. Do not build contributor docs around those
-surfaces until the code exists.
+later roadmap items.

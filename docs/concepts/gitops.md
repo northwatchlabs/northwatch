@@ -71,6 +71,6 @@ NorthWatch does not ask operators to configure arbitrary HTTP checks for
 Kubernetes workloads in the MVP. The wedge is resource-native health:
 controller status is the source of truth.
 
-External monitors are planned for a later phase. Keep the current
-GitOps docs focused on declared resources, controller reconciliation,
-and status conditions.
+External monitors are planned for a later phase. In v0.1, the
+operator-facing contract is declared resources, controller
+reconciliation, and status conditions.

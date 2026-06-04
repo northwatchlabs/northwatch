@@ -40,14 +40,19 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Architecture:
-      - architecture/index.md
-      - Overview: architecture/overview.md
-      - Status Derivation: architecture/status-derivation.md
-      - Data Model: architecture/data-model.md
-      - GitOps Model: architecture/gitops.md
-  - Development:
-      - development/index.md
-      - Local Setup: development/local-setup.md
-      - Release Process: development/release-process.md
-      - Conventions: development/conventions.md
+  - Getting Started: getting-started.md
+  - Installation: installation.md
+  - Configuration: configuration.md
+  - Operations: operations.md
+  - Concepts:
+      - concepts/index.md
+      - Runtime Model: concepts/overview.md
+      - Status Derivation: concepts/status-derivation.md
+      - Data Model: concepts/data-model.md
+      - GitOps Model: concepts/gitops.md
+  - Reference: reference.md
+  - Contributing:
+      - contributing/index.md
+      - Local Setup: contributing/local-setup.md
+      - Release Process: contributing/release-process.md
+      - Conventions: contributing/conventions.md

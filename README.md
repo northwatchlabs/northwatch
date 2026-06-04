@@ -209,13 +209,15 @@ The roadmap for v0.2.0+ (Postgres, external HTTP monitors,
 notifications, CLI, OCI-published chart) lives in the
 [GitHub milestones](https://github.com/northwatchlabs/northwatch/milestones).
 
-Contributor documentation starts in [`docs/index.md`](docs/index.md):
-architecture, status derivation, data model, GitOps behavior, local
-setup, and release process.
+User documentation starts in [`docs/index.md`](docs/index.md): getting
+started, installation, configuration, operations, concepts, and
+reference.
 
-See [`docs/development/conventions.md`](docs/development/conventions.md) for the foundational
-naming decisions (Go module path, container registry, Helm OCI path)
-that downstream tooling depends on.
+Contributor documentation starts in
+[`docs/contributing/index.md`](docs/contributing/index.md). See
+[`docs/contributing/conventions.md`](docs/contributing/conventions.md)
+for the foundational naming decisions (Go module path, container
+registry, Helm OCI path) that downstream tooling depends on.
 
 ## Develop
 
