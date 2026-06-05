@@ -10,3 +10,4 @@ common Go, CSS, image, Helm, and e2e loops.
 - [Local setup](local-setup.md)
 - [Release process](release-process.md)
 - [Project conventions](conventions.md)
+- [Decision log](decisions.md)

@@ -56,3 +56,4 @@ nav:
       - Local Setup: contributing/local-setup.md
       - Release Process: contributing/release-process.md
       - Conventions: contributing/conventions.md
+      - Decision Log: contributing/decisions.md
