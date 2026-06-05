@@ -124,5 +124,5 @@ make e2e
 ```
 
 The e2e loop creates a kind cluster, builds and loads the image, runs
-the killer-demo tests, and removes the cluster unless
+the product e2e tests, and removes the cluster unless
 `E2E_KEEP_CLUSTER` is set.

@@ -14,13 +14,11 @@ The main PR workflow runs:
 - cross-platform builds for linux and darwin on amd64 and arm64
 - a goreleaser snapshot build
 
-Additional workflows verify:
-
 - MkDocs strict build when docs change
 - container image build, smoke test, non-root runtime assertion, and
   multi-arch build validation
 - Helm chart lint and smoke tests with Helm 3 and Helm 4
-- killer-demo e2e tests in kind
+- product e2e tests in kind
 
 Run the focused local equivalent before pushing changes. For docs-only
 changes, `mise run docs-build` is usually enough. For Go behavior,
