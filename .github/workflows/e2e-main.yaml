@@ -1,10 +1,6 @@
-name: Run killer-demo e2e
+name: Run product e2e on main
 
 on:
-  pull_request:
-    branches: [main]
-  merge_group:
-    types: [checks_requested]
   push:
     branches: [main]
 
@@ -13,7 +9,7 @@ permissions:
 
 jobs:
   e2e:
-    name: Run killer-demo e2e
+    name: Run product e2e
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -75,7 +71,7 @@ jobs:
             --name northwatch-e2e
         timeout-minutes: 2
 
-      - name: Run killer-demo e2e
+      - name: Run product e2e
         env:
           E2E_CLUSTER: northwatch-e2e
         run: |

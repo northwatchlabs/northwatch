@@ -1,4 +1,4 @@
-# Fixture used by test/e2e and the e2e.yaml workflow. Points the
+# Fixture used by test/e2e and the e2e workflows. Points the
 # watcher at the dedicated e2e workload so this test stays
 # isolated from deploy/helm/ci/smoke-values.yaml (which targets
 # default/api-gateway and is used by the helm smoke).

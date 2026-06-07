@@ -1,4 +1,4 @@
-# Sample workload for the killer-demo e2e test.
+# Sample workload for the product e2e test.
 #
 # Pairs with deploy/helm/ci/e2e-values.yaml: the watched component
 # Deployment/northwatch-e2e-workload/api-gateway matches this
