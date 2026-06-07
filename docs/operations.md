@@ -32,6 +32,13 @@ Incident writes require `Authorization: Bearer <token>`. The token is
 configured with `--api-token`, `NORTHWATCH_API_TOKEN`, or the Helm chart
 `auth` values.
 
+For binary/env/flag runs, omit the API token to disable incident writes.
+For Helm installs, omitting both `auth.existingSecret` and `auth.token`
+keeps writes enabled because the chart generates a token. If the token is
+configured with `--api-token`, `NORTHWATCH_API_TOKEN`, or Helm auth
+values, it must be non-empty and at least 16 characters;
+configured-empty tokens fail startup.
+
 Create an incident:
 
 ```sh

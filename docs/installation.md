@@ -37,6 +37,11 @@ The chart resolves the token in this order:
 2. `auth.token`
 3. an auto-generated chart-managed Secret
 
+When using `auth.existingSecret`, the referenced key must contain a
+non-empty token value. A missing key prevents the pod from starting, and
+an empty value causes NorthWatch to fail startup instead of silently
+disabling incident writes.
+
 Retrieve the chart-managed token:
 
 ```sh

@@ -53,8 +53,9 @@ Common `serve` flags:
 | `--poll-seconds` | `NORTHWATCH_POLL_SECONDS` | `5` |
 | `--debounce-seconds` | `NORTHWATCH_DEBOUNCE_SECONDS` | `60` |
 
-`--api-token` must be empty or at least 16 characters. Empty disables
-write endpoints; public reads still work.
+`--api-token` and `NORTHWATCH_API_TOKEN` must be omitted or at least 16
+characters. Omission disables write endpoints; public reads still work.
+A configured empty token is invalid and NorthWatch refuses to boot.
 
 ## Safe component removal
 

@@ -100,9 +100,10 @@ export NORTHWATCH_API_TOKEN=dev-token-123456
 ./northwatch serve --no-cluster --config /tmp/northwatch.yaml --db /tmp/northwatch.db
 ```
 
-If the token is empty, NorthWatch serves reads and returns 401 for
-writes. If the token is present but shorter than 16 characters, boot
-fails.
+If the token is omitted, NorthWatch serves reads and returns 401 for
+writes. If `--api-token` or `NORTHWATCH_API_TOKEN` is configured but
+empty, boot fails. If the configured token is shorter than 16 characters,
+boot also fails.
 
 ## Database files
 

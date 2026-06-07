@@ -70,7 +70,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  --no-cluster       Skip cluster connectivity (local-only run)")
 	fmt.Fprintln(os.Stderr, "  --api-token        Bearer token for write endpoints (>=16 chars).")
 	fmt.Fprintln(os.Stderr, "                     Reads NORTHWATCH_API_TOKEN env when unset.")
-	fmt.Fprintln(os.Stderr, "                     Empty disables writes (POSTs return 401).")
+	fmt.Fprintln(os.Stderr, "                     Omit to disable writes (POSTs return 401).")
 	fmt.Fprintln(os.Stderr, "  --poll-seconds     HTMX polling interval in seconds (default 5)")
 	fmt.Fprintln(os.Stderr, "  --debounce-seconds Grace period before downward status transitions are persisted")
 	fmt.Fprintln(os.Stderr, "                     (>=0; default 60; 0 disables debounce)")
@@ -95,9 +95,7 @@ func serveCmd(args []string) int {
 	noCluster := fs.Bool("no-cluster",
 		envOrBool("NORTHWATCH_NO_CLUSTER", false),
 		"Skip cluster connectivity (local-only run)")
-	apiToken := fs.String("api-token",
-		envOr("NORTHWATCH_API_TOKEN", ""),
-		"Bearer token gating POST endpoints (>=16 chars). Empty disables writes.")
+	apiToken := fs.String("api-token", "", "Bearer token gating POST endpoints (>=16 chars). Omit to disable writes.")
 	pollSeconds := fs.Int("poll-seconds",
 		envOrInt("NORTHWATCH_POLL_SECONDS", 5),
 		"HTMX polling interval in seconds (>=1)")
@@ -112,6 +110,13 @@ func serveCmd(args []string) int {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	resolvedAPIToken, err := resolveAPIToken(fs)
+	if err != nil {
+		logger.Error("api token configured empty")
+		return 1
+	}
+	*apiToken = resolvedAPIToken
 
 	switch {
 	case *apiToken == "":
@@ -268,6 +273,32 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func resolveAPIToken(fs *flag.FlagSet) (string, error) {
+	var flagSet bool
+	var flagValue string
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "api-token" {
+			flagSet = true
+			flagValue = f.Value.String()
+		}
+	})
+	if flagSet {
+		if flagValue == "" {
+			return "", errors.New("api token configured empty")
+		}
+		return flagValue, nil
+	}
+
+	v, ok := os.LookupEnv("NORTHWATCH_API_TOKEN")
+	if !ok {
+		return "", nil
+	}
+	if v == "" {
+		return "", errors.New("api token configured empty")
+	}
+	return v, nil
 }
 
 // envOrBool reads a bool-ish env var. "1", "true", "yes"
