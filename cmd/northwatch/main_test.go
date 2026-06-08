@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"flag"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/northwatchlabs/northwatch/internal/store"
@@ -61,6 +63,28 @@ func writeConfig(t *testing.T, body string) string {
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe: %v", err)
+	}
+	os.Stdout = w
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close pipe writer: %v", err)
+	}
+	os.Stdout = old
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll stdout: %v", err)
+	}
+	return string(out)
 }
 
 const cfgAB = `
@@ -151,6 +175,57 @@ func TestRunConfigSync_MissingConfig(t *testing.T) {
 	_, code := runConfigSync(context.Background(), st, "/does/not/exist.yaml", false, testLogger())
 	if code != 1 {
 		t.Errorf("code = %d, want 1", code)
+	}
+}
+
+func TestResolveAPIToken(t *testing.T) {
+	cases := []struct {
+		name    string
+		envSet  bool
+		envVal  string
+		args    []string
+		want    string
+		wantErr bool
+	}{
+		{name: "unset env and absent flag disables writes", want: ""},
+		{name: "empty env is invalid", envSet: true, envVal: "", wantErr: true},
+		{name: "non-empty env is used", envSet: true, envVal: "env-token-123456", want: "env-token-123456"},
+		{name: "empty flag is invalid", envSet: true, envVal: "env-token-123456", args: []string{"--api-token", ""}, wantErr: true},
+		{name: "flag wins over env", envSet: true, envVal: "env-token-123456", args: []string{"--api-token", "flag-token-123456"}, want: "flag-token-123456"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const key = "NORTHWATCH_API_TOKEN"
+			if tc.envSet {
+				t.Setenv(key, tc.envVal)
+			} else {
+				t.Setenv(key, "ignored")
+				if err := os.Unsetenv(key); err != nil {
+					t.Fatalf("Unsetenv: %v", err)
+				}
+			}
+
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.String("api-token", "", "")
+			if err := fs.Parse(tc.args); err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+
+			got, err := resolveAPIToken(fs)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("resolveAPIToken() err = nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveAPIToken() err = %v, want nil", err)
+			}
+			if got != tc.want {
+				t.Errorf("resolveAPIToken() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -278,7 +353,6 @@ func TestEnvOrInt(t *testing.T) {
 }
 
 func TestServeCmd_PollSecondsValidation(t *testing.T) {
-	t.Parallel()
 	cases := []struct {
 		name string
 		val  string
@@ -299,5 +373,75 @@ func TestServeCmd_PollSecondsValidation(t *testing.T) {
 				t.Errorf("serveCmd exit = %d, want %d", code, tc.want)
 			}
 		})
+	}
+}
+
+func TestServeCmd_RejectsExplicitEmptyAPIToken(t *testing.T) {
+	cases := []struct {
+		name   string
+		envSet bool
+		envVal string
+		args   []string
+	}{
+		{name: "empty env", envSet: true, envVal: ""},
+		{name: "empty flag", envSet: true, envVal: "valid-env-token-1234", args: []string{"--api-token", ""}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.envSet {
+				t.Setenv("NORTHWATCH_API_TOKEN", tc.envVal)
+			} else {
+				t.Setenv("NORTHWATCH_API_TOKEN", "ignored")
+				if err := os.Unsetenv("NORTHWATCH_API_TOKEN"); err != nil {
+					t.Fatalf("Unsetenv: %v", err)
+				}
+			}
+
+			args := []string{
+				"--no-cluster",
+				"--db", filepath.Join(t.TempDir(), "nw.db"),
+				"--config", writeConfig(t, cfgAB),
+				"--poll-seconds", "0",
+			}
+			args = append(args, tc.args...)
+
+			logOut := captureStdout(t, func() {
+				if code := serveCmd(args); code != 1 {
+					t.Errorf("serveCmd exit = %d, want 1", code)
+				}
+			})
+			if !strings.Contains(logOut, "api token configured empty") {
+				t.Errorf("log output = %s, want api token configured empty", logOut)
+			}
+			if strings.Contains(logOut, "poll-seconds must be >= 1") {
+				t.Errorf("log output = %s, token validation should run before poll validation", logOut)
+			}
+		})
+	}
+}
+
+func TestServeCmd_OmittedAPITokenReachesLaterValidation(t *testing.T) {
+	t.Setenv("NORTHWATCH_API_TOKEN", "ignored")
+	if err := os.Unsetenv("NORTHWATCH_API_TOKEN"); err != nil {
+		t.Fatalf("Unsetenv: %v", err)
+	}
+
+	logOut := captureStdout(t, func() {
+		code := serveCmd([]string{
+			"--no-cluster",
+			"--db", filepath.Join(t.TempDir(), "nw.db"),
+			"--config", writeConfig(t, cfgAB),
+			"--poll-seconds", "0",
+		})
+		if code != 1 {
+			t.Errorf("serveCmd exit = %d, want 1", code)
+		}
+	})
+	if !strings.Contains(logOut, "poll-seconds must be >= 1") {
+		t.Errorf("log output = %s, want poll-seconds validation", logOut)
+	}
+	if strings.Contains(logOut, "api token configured empty") {
+		t.Errorf("log output = %s, omitted token should not be rejected as configured empty", logOut)
 	}
 }

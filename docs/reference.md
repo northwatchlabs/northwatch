@@ -46,6 +46,10 @@ Subcommands:
 | `--poll-seconds` | `NORTHWATCH_POLL_SECONDS` | `5` |
 | `--debounce-seconds` | `NORTHWATCH_DEBOUNCE_SECONDS` | `60` |
 
+Omit the API token to disable write endpoints. If `--api-token` or
+`NORTHWATCH_API_TOKEN` is configured, the value must be non-empty and at
+least 16 characters.
+
 ## HTTP routes
 
 | Method | Path | Auth | Notes |

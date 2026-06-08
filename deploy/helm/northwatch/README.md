@@ -46,7 +46,9 @@ The chart resolves the API token in this order:
 
 1. `auth.existingSecret` — the chart does not render its own Secret;
    the Deployment references `secretKeyRef: {name: <existingSecret>,
-   key: <existingSecretKey>}`.
+   key: <existingSecretKey>}`. The referenced key must contain a
+   non-empty token value; an empty value causes NorthWatch startup to
+   fail instead of disabling incident writes.
 2. `auth.token` — the chart renders a Secret with the literal value.
 3. Neither set — the chart auto-generates a 32-char alphanumeric token
    on first install and preserves it across `helm upgrade` via
