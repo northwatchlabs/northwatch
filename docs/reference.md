@@ -61,3 +61,13 @@ least 16 characters.
 | `GET` | `/api/status` | none | Rendered status section used by HTMX polling. |
 | `POST` | `/incidents` | bearer token | Create an incident. |
 | `POST` | `/incidents/{id}/resolve` | bearer token | Resolve an incident. |
+
+API error responses use a shared JSON envelope:
+
+```json
+{"error":"store error"}
+```
+
+Error responses set `Content-Type: application/json; charset=utf-8`.
+The successful `/api/status` response remains an HTML fragment for HTMX
+polling; only its error responses use the JSON envelope.
