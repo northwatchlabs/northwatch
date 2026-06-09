@@ -209,9 +209,10 @@ The roadmap for v0.2.0+ (Postgres, external HTTP monitors,
 notifications, CLI, OCI-published chart) lives in the
 [GitHub milestones](https://github.com/northwatchlabs/northwatch/milestones).
 
-User documentation starts in [`docs/index.md`](docs/index.md): getting
-started, installation, configuration, operations, concepts, and
-reference.
+Customer-facing documentation is published at
+<https://northwatchlabs.github.io/northwatch/>. The source lives in
+[`docs/index.md`](docs/index.md): getting started, installation,
+configuration, operations, concepts, and reference.
 
 Contributor documentation starts in
 [`docs/contributing/index.md`](docs/contributing/index.md). See
