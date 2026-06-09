@@ -57,7 +57,7 @@ func apiIncidentsHandler(svc *incident.Service, logger *slog.Logger) http.Handle
 		incs, err := svc.ListIncidents(r.Context(), includeResolved)
 		if err != nil {
 			logger.Error("api/incidents: ListIncidents failed", "err", err)
-			http.Error(w, "store error", http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, "store error")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -98,19 +98,13 @@ func createIncidentHandler(svc *incident.Service, logger *slog.Logger) http.Hand
 			return
 		case err != nil:
 			logger.Error("incidents: CreateIncident failed", "err", err)
-			http.Error(w, "store error", http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, "store error")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(toAPIIncident(inc))
 	}
-}
-
-func writeJSONError(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 // resolveIncidentHandler serves POST /incidents/{id}/resolve.
@@ -127,7 +121,7 @@ func resolveIncidentHandler(svc *incident.Service, logger *slog.Logger) http.Han
 			return
 		case err != nil:
 			logger.Error("incidents/resolve: failed", "err", err)
-			http.Error(w, "store error", http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, "store error")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")

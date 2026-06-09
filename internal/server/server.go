@@ -100,13 +100,13 @@ func statusSectionHandler(tmpl *template.Template, st store.Store, incSvc *incid
 		data, err := loadPageData(r.Context(), st, incSvc, pollSeconds)
 		if err != nil {
 			logger.Error("api/status: loadPageData failed", "err", err)
-			http.Error(w, "store error", http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, "store error")
 			return
 		}
 		var buf bytes.Buffer
 		if err := tmpl.ExecuteTemplate(&buf, "status_section", data); err != nil {
 			logger.Error("api/status: render failed", "err", err)
-			http.Error(w, "render error", http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, "render error")
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -189,7 +189,7 @@ func apiComponentsHandler(st store.Store, logger *slog.Logger) http.HandlerFunc 
 		comps, err := st.ListComponents(r.Context())
 		if err != nil {
 			logger.Error("api/components: ListComponents failed", "err", err)
-			http.Error(w, "store error", http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, "store error")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")

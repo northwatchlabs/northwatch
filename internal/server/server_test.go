@@ -59,6 +59,26 @@ func newHandler(t *testing.T, seed ...component.Component) http.Handler {
 	return h
 }
 
+func assertJSONError(t *testing.T, rr *httptest.ResponseRecorder, code int, msg string) {
+	t.Helper()
+	if rr.Code != code {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, code, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("content-type = %q, want application/json prefix", ct)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode error body: %v; body=%s", err, rr.Body.String())
+	}
+	if got["error"] != msg {
+		t.Fatalf("error = %q, want %q; body=%s", got["error"], msg, rr.Body.String())
+	}
+	if len(got) != 1 {
+		t.Fatalf("error body keys = %v, want only error", got)
+	}
+}
+
 func TestIndexReturnsStatusPage(t *testing.T) {
 	h := newHandler(t)
 	rr := httptest.NewRecorder()
@@ -202,6 +222,34 @@ func (failingStore) ListComponents(ctx context.Context) ([]component.Component, 
 	return nil, errors.New("synthetic store failure")
 }
 
+type failingIncidentListStore struct{ store.Store }
+
+func (failingIncidentListStore) ListIncidents(ctx context.Context, includeResolved bool) ([]incident.Incident, error) {
+	return nil, errors.New("synthetic incident list failure")
+}
+
+type failingCreateIncidentStore struct{ store.Store }
+
+func (failingCreateIncidentStore) HasActiveComponent(ctx context.Context, id string) (bool, error) {
+	return true, nil
+}
+
+func (failingCreateIncidentStore) CreateIncident(ctx context.Context, inc incident.Incident, firstUpdate incident.Update) error {
+	return errors.New("synthetic create incident failure")
+}
+
+type failingResolveIncidentStore struct{ store.Store }
+
+func (failingResolveIncidentStore) ResolveIncident(
+	ctx context.Context,
+	id string,
+	resolvedAt time.Time,
+	updateID string,
+	updateBody string,
+) (incident.Incident, error) {
+	return incident.Incident{}, errors.New("synthetic resolve incident failure")
+}
+
 func TestAPIComponents_StoreError(t *testing.T) {
 	ctx := context.Background()
 	real, err := store.OpenSQLite(ctx, ":memory:")
@@ -221,9 +269,7 @@ func TestAPIComponents_StoreError(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/components", nil))
 
-	if rr.Code != http.StatusInternalServerError {
-		t.Errorf("status = %d, want 500", rr.Code)
-	}
+	assertJSONError(t, rr, http.StatusInternalServerError, "store error")
 }
 
 // newHandlerWithStore returns the GET-only handler + the store for
@@ -330,6 +376,28 @@ func TestGetAPIIncidentsCacheControlNoStore(t *testing.T) {
 	}
 }
 
+func TestGetAPIIncidents_StoreError(t *testing.T) {
+	ctx := context.Background()
+	real, err := store.OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = real.Close() })
+	if err := real.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)),
+		failingIncidentListStore{Store: real}, "", 5)
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/incidents", nil))
+
+	assertJSONError(t, rr, http.StatusInternalServerError, "store error")
+}
+
 // postIncident is a small helper that POSTs a create-incident body
 // through the wired router, with the bearer token attached. Returns
 // the recorder so callers can assert on status and body.
@@ -424,6 +492,27 @@ func TestCreateIncidentHandlerMalformedJSON(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rr.Code)
 	}
+}
+
+func TestCreateIncidentHandler_StoreError(t *testing.T) {
+	ctx := context.Background()
+	real, err := store.OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = real.Close() })
+	if err := real.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)),
+		failingCreateIncidentStore{Store: real}, testToken, 5)
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+
+	rr := postIncident(t, h, `{"component":"Deployment/default/web","title":"Pods down"}`)
+
+	assertJSONError(t, rr, http.StatusInternalServerError, "store error")
 }
 
 func TestPostIncidentsRequiresAuth(t *testing.T) {
@@ -546,6 +635,27 @@ func TestPostIncidentsResolveNotFound(t *testing.T) {
 	if !strings.Contains(rr.Body.String(), "incident not found") {
 		t.Errorf("body = %s, want incident not found", rr.Body.String())
 	}
+}
+
+func TestResolveIncidentHandler_StoreError(t *testing.T) {
+	ctx := context.Background()
+	real, err := store.OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = real.Close() })
+	if err := real.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)),
+		failingResolveIncidentStore{Store: real}, testToken, 5)
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+
+	rr := resolveIncident(t, h, "01HXNOSUCHINCIDENT00000000", true)
+
+	assertJSONError(t, rr, http.StatusInternalServerError, "store error")
 }
 
 func TestPostIncidentsResolveIdempotent(t *testing.T) {
@@ -713,6 +823,28 @@ func TestApiStatus_PartialIncludesPollingAttrs(t *testing.T) {
 			t.Errorf("partial should not contain %q; body=%s", banned, body)
 		}
 	}
+}
+
+func TestApiStatus_StoreError(t *testing.T) {
+	ctx := context.Background()
+	real, err := store.OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = real.Close() })
+	if err := real.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)),
+		failingStore{Store: real}, "", 5)
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+
+	assertJSONError(t, rr, http.StatusInternalServerError, "store error")
 }
 
 func TestApiStatus_RendersDegradedWhenComponentDown(t *testing.T) {
