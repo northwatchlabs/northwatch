@@ -47,6 +47,7 @@ func newRecordStore() *recordStore {
 }
 
 func (s *recordStore) Close() error                  { return nil }
+func (s *recordStore) Ping(context.Context) error    { return nil }
 func (s *recordStore) Migrate(context.Context) error { return nil }
 func (s *recordStore) ListComponents(context.Context) ([]component.Component, error) {
 	return nil, nil

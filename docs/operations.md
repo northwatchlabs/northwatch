@@ -9,11 +9,17 @@ NorthWatch exposes:
 
 ```text
 GET /healthz
+GET /readyz
 ```
 
-The endpoint returns `200 OK` with `ok` when the HTTP process is
-running. It does not prove every configured Kubernetes watcher has
-observed its resource.
+`/healthz` returns `200 OK` with `ok` when the HTTP process is running.
+It is the liveness check used by the Helm chart.
+
+`/readyz` returns `200 OK` only when the store is reachable and every
+registered Kubernetes watcher has completed its initial cache sync. The
+Helm chart uses `/readyz` for readiness so Service traffic waits for the
+first trusted watcher snapshot. Local runs with `--no-cluster` have no
+watcher sync dependency, so readiness only checks the store.
 
 ## Status refresh
 

@@ -116,6 +116,38 @@ func captureStdout(t *testing.T, fn func()) string {
 	return string(out)
 }
 
+type testSyncedWatcher struct {
+	ch <-chan struct{}
+}
+
+func (w testSyncedWatcher) Start(context.Context) error { return nil }
+func (w testSyncedWatcher) Synced() <-chan struct{}     { return w.ch }
+
+func TestWatcherSyncedChannels(t *testing.T) {
+	first := make(chan struct{})
+	second := make(chan struct{})
+
+	got := watcherSyncedChannels([]syncedWatcher{
+		testSyncedWatcher{ch: first},
+		testSyncedWatcher{ch: second},
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2", len(got))
+	}
+	close(first)
+	select {
+	case <-got[0]:
+	default:
+		t.Fatal("first channel was not preserved")
+	}
+	select {
+	case <-got[1]:
+		t.Fatal("second channel should still be open")
+	default:
+	}
+}
+
 const cfgAB = `
 components:
   - kind: Deployment
