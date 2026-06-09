@@ -81,7 +81,7 @@ func (s *SQLite) UpsertComponent(ctx context.Context, c component.Component) err
 	if c.Status == "" {
 		c.Status = component.StatusUnknown
 	}
-	now := time.Now().UTC().Unix()
+	now := time.Now().UTC().UnixMilli()
 	_, err := s.db.ExecContext(ctx, stmtUpsertComponent,
 		c.Kind, c.Namespace, c.Name, c.DisplayName, string(c.Status), now)
 	return err
@@ -109,7 +109,7 @@ func (s *SQLite) GetComponent(ctx context.Context, id string) (component.Compone
 		return component.Component{}, err
 	}
 	c.Status = component.Status(status)
-	c.UpdatedAt = time.Unix(ts, 0).UTC()
+	c.UpdatedAt = time.UnixMilli(ts).UTC()
 	return c, nil
 }
 
@@ -162,7 +162,7 @@ func (s *SQLite) ListComponents(ctx context.Context) ([]component.Component, err
 			return nil, err
 		}
 		c.Status = component.Status(status)
-		c.UpdatedAt = time.Unix(ts, 0).UTC()
+		c.UpdatedAt = time.UnixMilli(ts).UTC()
 		out = append(out, c)
 	}
 	return out, rows.Err()
@@ -216,7 +216,7 @@ func (s *SQLite) SyncComponents(ctx context.Context, specs []ComponentSpec, allo
 	}
 
 	// 5. Upsert all specs.
-	now := time.Now().UTC().Unix()
+	now := time.Now().UTC().UnixMilli()
 	for _, sp := range specs {
 		if _, err := conn.ExecContext(ctx, stmtSyncUpsert,
 			sp.Kind, sp.Namespace, sp.Name, sp.DisplayName, now,

@@ -65,3 +65,12 @@ namespace prefix exposed to Prometheus, a public HTTP API path prefix.
 
 Conventions that are easy to change later (internal package layout,
 unexported types, log field names) do not belong here.
+
+## SQLite store conventions
+
+SQLite runs with WAL mode, `busy_timeout=5000`, and a connection pool
+limited to 8 open connections. SQLite still serializes writers, but WAL
+allows readers to proceed while one writer holds the write lock. Keep
+the pool small so status-page renders and API reads can run alongside
+watcher writes without encouraging a misleading "more writers equals
+more throughput" tuning path.

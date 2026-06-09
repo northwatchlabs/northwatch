@@ -36,7 +36,7 @@ Subcommands:
 | Flag | Environment variable | Default |
 |---|---|---|
 | `--addr` | `NORTHWATCH_ADDR` | `:8080` |
-| `--db` | `NORTHWATCH_DB` | `./northwatch.db` |
+| `--db` | `NORTHWATCH_DB` | `$XDG_DATA_HOME/northwatch/northwatch.db` |
 | `--config` | `NORTHWATCH_CONFIG` | `northwatch.yaml` |
 | `--allow-deactivate` | `NORTHWATCH_ALLOW_DEACTIVATE` | `false` |
 | `--kubeconfig` | `NORTHWATCH_KUBECONFIG` | auto-detected |

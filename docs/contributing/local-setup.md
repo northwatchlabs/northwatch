@@ -107,7 +107,9 @@ boot also fails.
 
 ## Database files
 
-The binary default SQLite path is `./northwatch.db`. Pass `--db` or set
+The binary default SQLite path is
+`$XDG_DATA_HOME/northwatch/northwatch.db`, falling back to
+`~/.local/share/northwatch/northwatch.db`. Pass `--db` or set
 `NORTHWATCH_DB` to keep local runs isolated.
 
 The container image defaults to

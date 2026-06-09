@@ -34,6 +34,35 @@ func TestNormalizeAddr(t *testing.T) {
 	}
 }
 
+func TestDefaultDBPath(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", xdg)
+	if got, want := defaultDBPath(), filepath.Join(xdg, "northwatch", "northwatch.db"); got != want {
+		t.Fatalf("defaultDBPath() = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultDBPathFallsBackToUserDataDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("HOME", home)
+	if got, want := defaultDBPath(), filepath.Join(home, ".local", "share", "northwatch", "northwatch.db"); got != want {
+		t.Fatalf("defaultDBPath() = %q, want %q", got, want)
+	}
+}
+
+func TestPrepareDBPathCreatesParent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "northwatch.db")
+	if err := prepareDBPath(path); err != nil {
+		t.Fatalf("prepareDBPath: %v", err)
+	}
+	if info, err := os.Stat(filepath.Dir(path)); err != nil {
+		t.Fatalf("Stat parent: %v", err)
+	} else if !info.IsDir() {
+		t.Fatalf("parent is not a directory")
+	}
+}
+
 // testStoreWithMigrate opens an in-memory store with migrations applied.
 func testStoreWithMigrate(t *testing.T) *store.SQLite {
 	t.Helper()

@@ -22,8 +22,8 @@ flowchart LR
 
 The `northwatch` binary supports `serve` and `migrate`. If no subcommand
 is passed, `serve` is used. The server defaults are intentionally
-local-friendly: `:8080` for HTTP, `./northwatch.db` for SQLite, and
-`northwatch.yaml` for config.
+local-friendly: `:8080` for HTTP, the user's XDG data directory for
+SQLite, and `northwatch.yaml` for config.
 
 The component config declares the Kubernetes resources NorthWatch should
 watch. It accepts `Deployment`, Flux `HelmRelease`, Flux

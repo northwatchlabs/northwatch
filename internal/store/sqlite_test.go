@@ -51,6 +51,50 @@ func TestMigrateRefusesNewerSchema(t *testing.T) {
 	}
 }
 
+func TestMigrateConvertsComponentUpdatedAtToMillis(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	_, err = s.DB().ExecContext(ctx, `
+CREATE TABLE components (
+  kind         TEXT    NOT NULL CHECK (kind      NOT LIKE '%/%'),
+  namespace    TEXT    NOT NULL CHECK (namespace NOT LIKE '%/%'),
+  name         TEXT    NOT NULL CHECK (name      NOT LIKE '%/%'),
+  id           TEXT    GENERATED ALWAYS AS (kind || '/' || namespace || '/' || name) STORED
+               UNIQUE,
+  display_name TEXT    NOT NULL DEFAULT '',
+  status       TEXT    NOT NULL DEFAULT 'unknown'
+               CHECK (status IN ('unknown','operational','degraded','down')),
+  updated_at   INTEGER NOT NULL,
+  active       INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))
+) STRICT;
+CREATE TABLE schema_migrations (version uint64, dirty bool);
+INSERT INTO schema_migrations (version, dirty) VALUES (2, 0);
+INSERT INTO components (kind, namespace, name, status, updated_at)
+VALUES ('Deployment', 'default', 'web', 'operational', 1710000000);
+`)
+	if err != nil {
+		t.Fatalf("seed v2 schema: %v", err)
+	}
+
+	if err := s.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	var got int64
+	if err := s.DB().QueryRowContext(ctx,
+		`SELECT updated_at FROM components WHERE id = 'Deployment/default/web'`).Scan(&got); err != nil {
+		t.Fatalf("query updated_at: %v", err)
+	}
+	if want := int64(1710000000000); got != want {
+		t.Fatalf("updated_at = %d, want %d", got, want)
+	}
+}
+
 func seedComponent(t *testing.T, s *store.SQLite, c component.Component) {
 	t.Helper()
 	if err := s.UpsertComponent(context.Background(), c); err != nil {
@@ -114,7 +158,16 @@ func TestUpsertIsIdempotent(t *testing.T) {
 	seedComponent(t, s, c)
 	first, _ := s.GetComponent(ctx, c.ID())
 
-	time.Sleep(time.Second + 50*time.Millisecond)
+	_, err := s.DB().ExecContext(ctx,
+		`UPDATE components SET updated_at = ? WHERE id = ?`,
+		first.UpdatedAt.Add(-time.Second).UnixMilli(), c.ID())
+	if err != nil {
+		t.Fatalf("force old updated_at: %v", err)
+	}
+	first, err = s.GetComponent(ctx, c.ID())
+	if err != nil {
+		t.Fatalf("GetComponent after timestamp reset: %v", err)
+	}
 
 	c.DisplayName = "Web (renamed)"
 	c.Status = component.StatusDegraded

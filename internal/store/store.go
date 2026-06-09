@@ -84,7 +84,7 @@ type Store interface {
 
 	// UpsertComponent inserts or updates by id. The store computes id
 	// from (Kind, Namespace, Name) — SQLite uses a STORED generated
-	// column — and stamps updated_at to time.Now().UTC().Unix().
+	// column — and stamps updated_at to time.Now().UTC().UnixMilli().
 	UpsertComponent(ctx context.Context, c component.Component) error
 
 	// SyncComponents reconciles the components table against the

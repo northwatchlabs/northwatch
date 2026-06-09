@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -26,7 +27,6 @@ import (
 
 const (
 	defaultAddr = ":8080"
-	defaultDB   = "./northwatch.db"
 )
 
 func main() {
@@ -62,7 +62,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "serve flags:")
 	fmt.Fprintln(os.Stderr, "  --addr             HTTP listen address (default :8080)")
-	fmt.Fprintln(os.Stderr, "  --db               SQLite database file path (default ./northwatch.db)")
+	fmt.Fprintln(os.Stderr, "  --db               SQLite database file path (default $XDG_DATA_HOME/northwatch/northwatch.db)")
 	fmt.Fprintln(os.Stderr, "  --config           Path to YAML component config (default northwatch.yaml)")
 	fmt.Fprintln(os.Stderr, "  --allow-deactivate Allow boot to deactivate components no longer in --config")
 	fmt.Fprintln(os.Stderr, "  --kubeconfig       Explicit kubeconfig path (overrides in-cluster credentials)")
@@ -79,7 +79,7 @@ func usage() {
 func serveCmd(args []string) int {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	addr := fs.String("addr", envOr("NORTHWATCH_ADDR", defaultAddr), "HTTP listen address")
-	dbPath := fs.String("db", envOr("NORTHWATCH_DB", defaultDB), "SQLite database file path")
+	dbPath := fs.String("db", envOr("NORTHWATCH_DB", defaultDBPath()), "SQLite database file path")
 	configPath := fs.String("config",
 		envOr("NORTHWATCH_CONFIG", "northwatch.yaml"),
 		"Path to YAML config declaring watched components")
@@ -144,6 +144,10 @@ func serveCmd(args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	if err := prepareDBPath(*dbPath); err != nil {
+		logger.Error("prepare store path failed", "err", err, "db", *dbPath)
+		return 1
+	}
 	st, err := store.OpenSQLite(ctx, *dbPath)
 	if err != nil {
 		logger.Error("open store failed", "err", err, "db", *dbPath)
@@ -241,7 +245,7 @@ func serveCmd(args []string) int {
 
 func migrateCmd(args []string) int {
 	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
-	dbPath := fs.String("db", envOr("NORTHWATCH_DB", defaultDB), "SQLite database file path")
+	dbPath := fs.String("db", envOr("NORTHWATCH_DB", defaultDBPath()), "SQLite database file path")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -250,9 +254,12 @@ func migrateCmd(args []string) int {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	ctx := context.Background()
 
+	if err := prepareDBPath(*dbPath); err != nil {
+		logger.Error("prepare store path failed", "err", err, "db", *dbPath)
+		return 1
+	}
 	st, err := store.OpenSQLite(ctx, *dbPath)
 	if err != nil {
 		logger.Error("open store failed", "err", err, "db", *dbPath)
@@ -273,6 +280,28 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func defaultDBPath() string {
+	if dataHome := os.Getenv("XDG_DATA_HOME"); dataHome != "" {
+		return filepath.Join(dataHome, "northwatch", "northwatch.db")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "./northwatch.db"
+	}
+	return filepath.Join(home, ".local", "share", "northwatch", "northwatch.db")
+}
+
+func prepareDBPath(path string) error {
+	if path == ":memory:" {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if dir == "." || dir == "" {
+		return nil
+	}
+	return os.MkdirAll(dir, 0o700)
 }
 
 func resolveAPIToken(fs *flag.FlagSet) (string, error) {
