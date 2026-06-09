@@ -75,8 +75,10 @@ Open <http://localhost:8080>.
 
 ## Database path
 
-The binary default SQLite path is `./northwatch.db`. The container image
-defaults to `/var/lib/northwatch/northwatch.db`.
+The binary default SQLite path is
+`$XDG_DATA_HOME/northwatch/northwatch.db`, falling back to
+`~/.local/share/northwatch/northwatch.db`. The container image defaults
+to `/var/lib/northwatch/northwatch.db`.
 
 The current Helm chart uses `emptyDir` for that directory, so data is
 lost when the pod restarts. PVC support is planned for a later release.

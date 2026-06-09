@@ -66,8 +66,9 @@ Component status is one of:
 - `degraded`
 - `down`
 
-`updated_at` is written by the store when status is upserted. It tracks
-status update time, not config sync time.
+`updated_at` is written by the store when status is upserted. It is a
+Unix timestamp in milliseconds and tracks status update time, not
+config sync time.
 
 `active` separates current desired components from historical rows.
 When a component disappears from config, `SyncComponents` can
@@ -107,8 +108,9 @@ table on component state transitions.
 ## Persistence behavior
 
 SQLite is the only supported database in v0.1. The binary default path
-is `./northwatch.db`; the container image defaults to
-`/var/lib/northwatch/northwatch.db`.
+is `$XDG_DATA_HOME/northwatch/northwatch.db`, falling back to
+`~/.local/share/northwatch/northwatch.db`. The container image defaults
+to `/var/lib/northwatch/northwatch.db`.
 
 `northwatch serve` applies migrations on startup. `northwatch migrate`
 applies pending migrations and exits, which is useful when an operator
