@@ -56,6 +56,7 @@ least 16 characters.
 |---|---|---|---|
 | `GET` | `/` | none | Public status page. |
 | `GET` | `/healthz` | none | Process health check. |
+| `GET` | `/readyz` | none | Readiness check. Requires store reachability and initial watcher sync. |
 | `GET` | `/api/components` | none | JSON component list. |
 | `GET` | `/api/incidents` | none | Active incidents by default. Use `?include=resolved` to include resolved incidents. |
 | `GET` | `/api/status` | none | Rendered status section used by HTMX polling. |

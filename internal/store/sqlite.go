@@ -53,6 +53,9 @@ func OpenSQLite(ctx context.Context, path string) (*SQLite, error) {
 // Close releases the underlying connection pool.
 func (s *SQLite) Close() error { return s.db.Close() }
 
+// Ping verifies the SQLite connection pool is reachable.
+func (s *SQLite) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+
 // DB exposes the underlying *sql.DB for tests in this package only.
 // Production callers should never reach for this.
 func (s *SQLite) DB() *sql.DB { return s.db }

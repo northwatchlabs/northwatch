@@ -29,6 +29,13 @@ type pageData struct {
 	PollSeconds    int
 }
 
+// Readiness configures /readyz dependencies beyond process liveness.
+type Readiness struct {
+	WatcherRegistrationComplete <-chan struct{}
+	WatcherSynced               []<-chan struct{}
+	WatcherSyncedFunc           func() []<-chan struct{}
+}
+
 // New returns an http.Handler with routes for the status page,
 // healthcheck, embedded static assets, and bearer-token-protected
 // write endpoints. The store is consulted on every index render.
@@ -36,7 +43,7 @@ type pageData struct {
 // apiToken gates POST routes. An empty token boots the server with
 // the write side disabled — every POST returns 401. Reads remain
 // public regardless of token state.
-func New(logger *slog.Logger, st store.Store, apiToken string, pollSeconds int) (http.Handler, error) {
+func New(logger *slog.Logger, st store.Store, apiToken string, pollSeconds int, readiness Readiness) (http.Handler, error) {
 	tmpl, err := ui.Templates()
 	if err != nil {
 		return nil, err
@@ -55,6 +62,7 @@ func New(logger *slog.Logger, st store.Store, apiToken string, pollSeconds int) 
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	r.Get("/readyz", readyzHandler(st, readiness))
 
 	incSvc := incident.NewService(st, logger)
 
@@ -71,6 +79,37 @@ func New(logger *slog.Logger, st store.Store, apiToken string, pollSeconds int) 
 	})
 
 	return r, nil
+}
+
+func readyzHandler(st store.Store, ready Readiness) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := st.Ping(r.Context()); err != nil {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		if ready.WatcherRegistrationComplete != nil {
+			select {
+			case <-ready.WatcherRegistrationComplete:
+			default:
+				http.Error(w, "not ready", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		syncedChannels := ready.WatcherSynced
+		if ready.WatcherSyncedFunc != nil {
+			syncedChannels = ready.WatcherSyncedFunc()
+		}
+		for _, synced := range syncedChannels {
+			select {
+			case <-synced:
+			default:
+				http.Error(w, "not ready", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok\n"))
+	}
 }
 
 func indexHandler(tmpl *template.Template, st store.Store, incSvc *incident.Service, pollSeconds int, logger *slog.Logger) http.HandlerFunc {

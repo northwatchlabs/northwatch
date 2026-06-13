@@ -43,7 +43,7 @@ func newHandlerWith(t *testing.T, token string, seed ...component.Component) (ht
 			t.Fatalf("UpsertComponent: %v", err)
 		}
 	}
-	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)), st, token, 5)
+	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)), st, token, 5, server.Readiness{})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
@@ -57,6 +57,20 @@ func newHandler(t *testing.T, seed ...component.Component) http.Handler {
 	t.Helper()
 	h, _ := newHandlerWith(t, "", seed...)
 	return h
+}
+
+func testSQLiteStore(t *testing.T) *store.SQLite {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.OpenSQLite(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	return st
 }
 
 func assertJSONError(t *testing.T, rr *httptest.ResponseRecorder, code int, msg string) {
@@ -137,6 +151,97 @@ func TestHealthz(t *testing.T) {
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+}
+
+func TestReadyzWaitsForWatcherSync(t *testing.T) {
+	st := testSQLiteStore(t)
+	synced := make(chan struct{})
+	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)), st, "", 5, server.Readiness{
+		WatcherSynced: []<-chan struct{}{synced},
+	})
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status before sync = %d, want 503", rr.Code)
+	}
+
+	close(synced)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status after sync = %d, want 200", rr.Code)
+	}
+}
+
+func TestReadyzWaitsForWatcherRegistration(t *testing.T) {
+	st := testSQLiteStore(t)
+	registrationComplete := make(chan struct{})
+	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)), st, "", 5, server.Readiness{
+		WatcherRegistrationComplete: registrationComplete,
+	})
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status before watcher registration = %d, want 503", rr.Code)
+	}
+
+	close(registrationComplete)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status after watcher registration = %d, want 200", rr.Code)
+	}
+}
+
+func TestReadyzReadsDynamicWatcherSyncState(t *testing.T) {
+	st := testSQLiteStore(t)
+	synced := make(chan struct{})
+	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)), st, "", 5, server.Readiness{
+		WatcherSyncedFunc: func() []<-chan struct{} {
+			return []<-chan struct{}{synced}
+		},
+	})
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status before dynamic sync = %d, want 503", rr.Code)
+	}
+
+	close(synced)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status after dynamic sync = %d, want 200", rr.Code)
+	}
+}
+
+func TestReadyzRequiresReachableStore(t *testing.T) {
+	st := testSQLiteStore(t)
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)), st, "", 5, server.Readiness{})
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rr.Code)
 	}
 }
 
@@ -261,7 +366,7 @@ func TestAPIComponents_StoreError(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)),
-		failingStore{Store: real}, "", 5)
+		failingStore{Store: real}, "", 5, server.Readiness{})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
@@ -387,7 +492,7 @@ func TestGetAPIIncidents_StoreError(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)),
-		failingIncidentListStore{Store: real}, "", 5)
+		failingIncidentListStore{Store: real}, "", 5, server.Readiness{})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
@@ -505,7 +610,7 @@ func TestCreateIncidentHandler_StoreError(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)),
-		failingCreateIncidentStore{Store: real}, testToken, 5)
+		failingCreateIncidentStore{Store: real}, testToken, 5, server.Readiness{})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
@@ -648,7 +753,7 @@ func TestResolveIncidentHandler_StoreError(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)),
-		failingResolveIncidentStore{Store: real}, testToken, 5)
+		failingResolveIncidentStore{Store: real}, testToken, 5, server.Readiness{})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
@@ -769,7 +874,7 @@ func TestIndex_BannerIncidentTakesPriority(t *testing.T) {
 	if _, err := incSvc.CreateIncident(ctx, comp.ID(), "Demo outage"); err != nil {
 		t.Fatalf("CreateIncident: %v", err)
 	}
-	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)), st, "", 5)
+	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)), st, "", 5, server.Readiness{})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}
@@ -836,7 +941,7 @@ func TestApiStatus_StoreError(t *testing.T) {
 		t.Fatalf("Migrate: %v", err)
 	}
 	h, err := server.New(slog.New(slog.NewTextHandler(io.Discard, nil)),
-		failingStore{Store: real}, "", 5)
+		failingStore{Store: real}, "", 5, server.Readiness{})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)
 	}

@@ -66,7 +66,8 @@ it into a distroless non-root runtime image, and defaults SQLite to:
 The in-tree chart lives at `deploy/helm/northwatch`. Chart verification
 uses `helm lint`, builds a matching NorthWatch image from the chart
 `appVersion`, installs the chart into kind, waits for the deployment,
-checks `/healthz`, checks component status through `/api/components`,
+checks `/healthz`, waits on the `/readyz` readiness probe through the
+deployment, checks component status through `/api/components`,
 and verifies cluster-scoped RBAC is removed on uninstall.
 
 The project convention for the future OCI chart path is:

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -28,6 +29,11 @@ import (
 const (
 	defaultAddr = ":8080"
 )
+
+type syncedWatcher interface {
+	Start(context.Context) error
+	Synced() <-chan struct{}
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -171,7 +177,21 @@ func serveCmd(args []string) int {
 		return 1
 	}
 
-	h, err := server.New(logger, st, *apiToken, *pollSeconds)
+	var watcherMu sync.RWMutex
+	var watchers []syncedWatcher
+	watcherRegistrationComplete := make(chan struct{})
+	if kc == nil {
+		close(watcherRegistrationComplete)
+	}
+
+	h, err := server.New(logger, st, *apiToken, *pollSeconds, server.Readiness{
+		WatcherRegistrationComplete: watcherRegistrationComplete,
+		WatcherSyncedFunc: func() []<-chan struct{} {
+			watcherMu.RLock()
+			defer watcherMu.RUnlock()
+			return watcherSyncedChannels(watchers)
+		},
+	})
 	if err != nil {
 		logger.Error("server init failed", "err", err)
 		return 1
@@ -196,33 +216,33 @@ func serveCmd(args []string) int {
 		errCh <- srv.ListenAndServe()
 	}()
 	if kc != nil {
-		depWatcher := watcher.NewDeploymentWatcher(kc.Clientset, st, cfg.Components, logger, window, clock.RealClock{})
 		go func() {
-			if err := depWatcher.Start(ctx); err != nil {
-				errCh <- err
+			discovered := []syncedWatcher{
+				watcher.NewDeploymentWatcher(kc.Clientset, st, cfg.Components, logger, window, clock.RealClock{}),
+			}
+			if hrWatcher := buildHelmReleaseWatcher(ctx, kc, st, cfg.Components, logger, window, clock.RealClock{}); hrWatcher != nil {
+				discovered = append(discovered, hrWatcher)
+			}
+			if appWatcher := buildApplicationWatcher(ctx, kc, st, cfg.Components, logger, window, clock.RealClock{}); appWatcher != nil {
+				discovered = append(discovered, appWatcher)
+			}
+			if ksWatcher := buildKustomizationWatcher(ctx, kc, st, cfg.Components, logger, window, clock.RealClock{}); ksWatcher != nil {
+				discovered = append(discovered, ksWatcher)
+			}
+
+			watcherMu.Lock()
+			watchers = discovered
+			watcherMu.Unlock()
+			close(watcherRegistrationComplete)
+
+			for _, w := range discovered {
+				go func(w syncedWatcher) {
+					if err := w.Start(ctx); err != nil {
+						errCh <- err
+					}
+				}(w)
 			}
 		}()
-		if hrWatcher := buildHelmReleaseWatcher(ctx, kc, st, cfg.Components, logger, window, clock.RealClock{}); hrWatcher != nil {
-			go func() {
-				if err := hrWatcher.Start(ctx); err != nil {
-					errCh <- err
-				}
-			}()
-		}
-		if appWatcher := buildApplicationWatcher(ctx, kc, st, cfg.Components, logger, window, clock.RealClock{}); appWatcher != nil {
-			go func() {
-				if err := appWatcher.Start(ctx); err != nil {
-					errCh <- err
-				}
-			}()
-		}
-		if ksWatcher := buildKustomizationWatcher(ctx, kc, st, cfg.Components, logger, window, clock.RealClock{}); ksWatcher != nil {
-			go func() {
-				if err := ksWatcher.Start(ctx); err != nil {
-					errCh <- err
-				}
-			}()
-		}
 	}
 
 	select {
@@ -441,6 +461,14 @@ func runClusterInit(
 		KubeContext:    kubeContext,
 		Logger:         logger,
 	})
+}
+
+func watcherSyncedChannels(watchers []syncedWatcher) []<-chan struct{} {
+	channels := make([]<-chan struct{}, 0, len(watchers))
+	for _, w := range watchers {
+		channels = append(channels, w.Synced())
+	}
+	return channels
 }
 
 // buildHelmReleaseWatcher probes for the Flux HelmRelease CRD and

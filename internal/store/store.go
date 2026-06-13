@@ -59,6 +59,9 @@ type Store interface {
 	// Close releases the underlying connection pool. Safe to call once.
 	Close() error
 
+	// Ping verifies the store is reachable.
+	Ping(ctx context.Context) error
+
 	// Migrate brings the schema to the version embedded in this binary.
 	// Idempotent. Returns ErrSchemaTooNew if the DB on disk is already
 	// at a higher version than this binary supports. The ctx parameter
